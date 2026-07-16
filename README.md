@@ -38,10 +38,12 @@ npm install --prefix frontend
 wails3 dev
 ```
 
-Development builds intentionally check out
-`7e30bc454196683129b8a883a2a1e6011f35bcc6` after the first clone, making the
-normal fetch/pull update flow easy to test. Production builds keep the cloned
-`main` tip.
+Development builds fetch
+`7e30bc454196683129b8a883a2a1e6011f35bcc6` directly by exact SHA for the first
+install, making the normal fetch/pull update flow easy to test without first
+downloading the current `main` tip. If the Git server does not support exact-SHA
+fetches, the installer falls back to fetching the full `main` history.
+Production builds continue to shallow-clone the `main` tip.
 
 Run all automated tests:
 

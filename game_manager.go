@@ -64,6 +64,7 @@ type gameManager struct {
 	paths         dataPaths
 	repositoryURL string
 	initialCommit string
+	initialFetch  func(context.Context, *git.Repository, *git.FetchOptions) error
 	logger        *slog.Logger
 	emit          stateEmitter
 	state         GameState
@@ -81,8 +82,11 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 		paths:         paths,
 		repositoryURL: gameRepositoryURL,
 		initialCommit: developmentInitialGameCommit,
-		logger:        logger,
-		emit:          emit,
+		initialFetch: func(ctx context.Context, repository *git.Repository, options *git.FetchOptions) error {
+			return repository.FetchContext(ctx, options)
+		},
+		logger: logger,
+		emit:   emit,
 		state: GameState{
 			Status:  StatusMissing,
 			Message: "尚未下載遊戲",
@@ -190,7 +194,11 @@ func (m *gameManager) StartInstall() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.running = true
-	m.state = GameState{Status: StatusInstalling, ProgressPhase: "準備", ProgressText: "正在連線 Git server…", ProgressPercent: -1, Message: "正在 clone 官方 main 分支…"}
+	message := "正在 clone 官方 main 分支…"
+	if m.initialCommit != "" {
+		message = "正在下載 development 固定版本…"
+	}
+	m.state = GameState{Status: StatusInstalling, ProgressPhase: "準備", ProgressText: "正在連線 Git server…", ProgressPercent: -1, Message: message}
 	m.advanceRevisionLocked()
 	state := m.state
 	m.wg.Add(1)
@@ -332,7 +340,6 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 }
 
 func (m *gameManager) cloneAndActivate(ctx context.Context) error {
-	m.logger.Info("starting repository clone", "url", m.repositoryURL, "branch", gameBranch, "depth", 1)
 	staging, err := os.MkdirTemp(m.paths.Staging, "clone-")
 	if err != nil {
 		return fmt.Errorf("create clone directory: %w", err)
@@ -342,21 +349,26 @@ func (m *gameManager) cloneAndActivate(ctx context.Context) error {
 	progress.WatchPackDir(filepath.Join(staging, ".git", "objects", "pack"))
 	defer progress.Close()
 
-	repository, err := git.PlainCloneContext(ctx, staging, false, &git.CloneOptions{
-		URL:           m.repositoryURL,
-		ReferenceName: gameBranchReference,
-		SingleBranch:  true,
-		Depth:         1,
-		Tags:          git.NoTags,
-		Progress:      progress,
-	})
-	if err != nil {
-		return fmt.Errorf("clone game repository: %w", err)
-	}
-	m.logger.Info("repository clone transfer completed", "staging", staging)
-	progress.Stage("準備版本", "正在選擇初始 commit…")
-	if err := m.checkoutInitialCommit(ctx, repository, progress); err != nil {
-		return err
+	var repository *git.Repository
+	if m.initialCommit == "" {
+		m.logger.Info("starting repository clone", "url", m.repositoryURL, "branch", gameBranch, "depth", 1)
+		repository, err = git.PlainCloneContext(ctx, staging, false, &git.CloneOptions{
+			URL:           m.repositoryURL,
+			ReferenceName: gameBranchReference,
+			SingleBranch:  true,
+			Depth:         1,
+			Tags:          git.NoTags,
+			Progress:      progress,
+		})
+		if err != nil {
+			return fmt.Errorf("clone game repository: %w", err)
+		}
+		m.logger.Info("repository clone transfer completed", "staging", staging)
+	} else {
+		repository, err = m.fetchDevelopmentRepository(ctx, staging, progress)
+		if err != nil {
+			return err
+		}
 	}
 	progress.Stage("驗證檔案", "正在驗證遊戲檔案…")
 	if err := validateGameRoot(staging); err != nil {
@@ -374,66 +386,84 @@ func (m *gameManager) cloneAndActivate(ctx context.Context) error {
 	return m.activate(head.Hash().String(), "安裝完成，可離線啟動")
 }
 
-func (m *gameManager) checkoutInitialCommit(ctx context.Context, repository *git.Repository, progress *gitProgressReporter) error {
-	if m.initialCommit == "" {
-		m.logger.Info("using cloned main tip")
-		return nil
-	}
-	m.logger.Info("preparing development initial commit", "commit", m.initialCommit)
+func (m *gameManager) fetchDevelopmentRepository(ctx context.Context, staging string, progress *gitProgressReporter) (*git.Repository, error) {
 	if !validCommit(m.initialCommit) {
-		return errors.New("development initial commit is invalid")
+		return nil, errors.New("development initial commit is invalid")
 	}
+	m.logger.Info("starting development fixed-commit fetch", "url", m.repositoryURL, "commit", m.initialCommit, "depth", 1)
+	repository, err := git.PlainInit(staging, false)
+	if err != nil {
+		return nil, fmt.Errorf("initialize development repository: %w", err)
+	}
+	if _, err := repository.CreateRemote(&config.RemoteConfig{
+		Name:  "origin",
+		URLs:  []string{m.repositoryURL},
+		Fetch: []config.RefSpec{gameFetchRefSpec},
+	}); err != nil {
+		return nil, fmt.Errorf("create development origin remote: %w", err)
+	}
+
 	hash := plumbing.NewHash(m.initialCommit)
-	if _, err := repository.CommitObject(hash); err != nil {
-		progress.Stage("取得測試版本", "正在下載 development 初始 commit…")
-		developmentReference := plumbing.NewRemoteReferenceName("origin", "development-base")
-		refSpec := config.RefSpec(m.initialCommit + ":" + developmentReference.String())
-		fetchErr := repository.FetchContext(ctx, &git.FetchOptions{
+	progress.Stage("取得固定版本", "正在下載 development 固定 commit…")
+	fetchErr := m.initialFetch(ctx, repository, &git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{config.RefSpec(m.initialCommit + ":" + gameRemoteReference.String())},
+		Depth:      1,
+		Tags:       git.NoTags,
+		Progress:   progress,
+	})
+	if errors.Is(fetchErr, git.ErrExactSHA1NotSupported) {
+		m.logger.Warn("Git server does not support exact-SHA fetch; falling back to full main history", "commit", m.initialCommit)
+		progress.Stage("相容模式", "Git server 不支援固定 SHA；正在下載完整 main 歷史…")
+		fetchErr = m.initialFetch(ctx, repository, &git.FetchOptions{
 			RemoteName: "origin",
-			RefSpecs:   []config.RefSpec{refSpec},
-			Depth:      1,
+			RefSpecs:   []config.RefSpec{gameFetchRefSpec},
+			Depth:      0,
 			Tags:       git.NoTags,
 			Progress:   progress,
 		})
-		if fetchErr != nil && !errors.Is(fetchErr, git.NoErrAlreadyUpToDate) {
-			// Local/file transports do not advertise exact-SHA wants. Deepening
-			// main is a development-only fallback; GitHub normally takes the
-			// single-commit path above.
-			fetchErr = repository.FetchContext(ctx, &git.FetchOptions{
-				RemoteName: "origin",
-				RefSpecs:   []config.RefSpec{gameFetchRefSpec},
-				Depth:      1_000_000,
-				Tags:       git.NoTags,
-				Progress:   progress,
-			})
-		}
-		if fetchErr != nil && !errors.Is(fetchErr, git.NoErrAlreadyUpToDate) {
-			return fmt.Errorf("fetch development initial commit: %w", fetchErr)
-		}
-		if _, err := repository.CommitObject(hash); err != nil {
-			return fmt.Errorf("read development initial commit: %w", err)
-		}
-		_ = repository.Storer.RemoveReference(developmentReference)
 	}
+	if fetchErr != nil && !errors.Is(fetchErr, git.NoErrAlreadyUpToDate) {
+		return nil, fmt.Errorf("fetch development initial commit: %w", fetchErr)
+	}
+	if _, err := repository.CommitObject(hash); err != nil {
+		return nil, fmt.Errorf("read development initial commit: %w", err)
+	}
+
 	worktree, err := repository.Worktree()
 	if err != nil {
-		return fmt.Errorf("open cloned working tree: %w", err)
+		return nil, fmt.Errorf("open development working tree: %w", err)
 	}
-	progress.Stage("Checkout", "正在 checkout development 初始 commit…")
-	if err := worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: hash}); err != nil {
-		return fmt.Errorf("checkout development initial commit: %w", err)
+	progress.Stage("Checkout", "正在 checkout development 固定 commit…")
+	if err := worktree.Checkout(&git.CheckoutOptions{
+		Branch: gameBranchReference,
+		Hash:   hash,
+		Create: true,
+		Force:  true,
+	}); err != nil {
+		return nil, fmt.Errorf("checkout development initial commit: %w", err)
 	}
-	// The initial shallow clone may have marked today's main tip as the first
-	// shallow boundary. Once we deliberately rewind, the pinned commit is the
-	// only meaningful boundary for later fast-forward checks and pulls.
-	if err := repository.Storer.SetShallow([]plumbing.Hash{hash}); err != nil {
-		return fmt.Errorf("set development shallow baseline: %w", err)
-	}
+
 	if err := repository.Storer.SetReference(plumbing.NewHashReference(gameRemoteReference, hash)); err != nil {
-		return fmt.Errorf("prepare development update baseline: %w", err)
+		return nil, fmt.Errorf("prepare development update baseline: %w", err)
 	}
-	m.logger.Info("development initial commit checked out", "commit", hash.String())
-	return nil
+	if err := repository.Storer.SetShallow([]plumbing.Hash{hash}); err != nil {
+		return nil, fmt.Errorf("set development shallow baseline: %w", err)
+	}
+	repositoryConfig, err := repository.Config()
+	if err != nil {
+		return nil, fmt.Errorf("read development repository config: %w", err)
+	}
+	repositoryConfig.Branches[gameBranch] = &config.Branch{
+		Name:   gameBranch,
+		Remote: "origin",
+		Merge:  gameBranchReference,
+	}
+	if err := repository.Storer.SetConfig(repositoryConfig); err != nil {
+		return nil, fmt.Errorf("configure development main tracking: %w", err)
+	}
+	m.logger.Info("development fixed commit fetched and checked out", "commit", hash.String())
+	return repository, nil
 }
 
 func (m *gameManager) checkForUpdate(ctx context.Context) error {

@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	git "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
@@ -220,21 +224,49 @@ func TestFetchDetectsBehindAndPullUpdatesOnlyWorkingTree(t *testing.T) {
 	}
 }
 
-func TestDevelopmentCloneStartsAtPinnedCommitThenFindsUpdate(t *testing.T) {
+func TestDevelopmentInstallFetchesOnlyPinnedCommitThenFindsUpdate(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
 	pinnedCommit := remote.head(t)
+	pinnedFixtureReference := plumbing.NewBranchReferenceName("pinned-install-fixture")
+	if err := remote.repository.Storer.SetReference(plumbing.NewHashReference(pinnedFixtureReference, plumbing.NewHash(pinnedCommit))); err != nil {
+		t.Fatal(err)
+	}
 	remote.commitFile(t, "css/app.css", "body{color:white}", "first update")
 	latestCommit := remote.commitFile(t, "js/app.js", "console.log('latest')", "second update")
 	manager := testManager(t, remote.path, nil)
 	manager.initialCommit = pinnedCommit
+	var fetches initialFetchRecorder
+	manager.initialFetch = func(ctx context.Context, repository *git.Repository, options *git.FetchOptions) error {
+		fetches.record(options)
+		mappedOptions := *options
+		mappedOptions.RefSpecs = []config.RefSpec{config.RefSpec("+" + pinnedFixtureReference.String() + ":" + gameRemoteReference.String())}
+		return repository.FetchContext(ctx, &mappedOptions)
+	}
 
 	if err := manager.StartInstall(); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, StatusReady)
 	if manager.State().Commit != pinnedCommit {
-		t.Fatalf("development clone did not checkout the pinned commit: %+v", manager.State())
+		t.Fatalf("development install did not checkout the pinned commit: %+v", manager.State())
 	}
+	calls := fetches.snapshot()
+	assertInitialFetchCalls(t, calls, []initialFetchCall{{
+		remoteName: "origin",
+		refSpecs:   []config.RefSpec{config.RefSpec(pinnedCommit + ":" + gameRemoteReference.String())},
+		depth:      1,
+		noTags:     true,
+	}})
+
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installed.CommitObject(plumbing.NewHash(latestCommit)); err == nil {
+		t.Fatal("development install downloaded the latest main commit before update check")
+	}
+	assertDevelopmentRepositoryMetadata(t, installed, pinnedCommit)
+
 	if err := manager.StartCheckForUpdate(); err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +280,213 @@ func TestDevelopmentCloneStartsAtPinnedCommitThenFindsUpdate(t *testing.T) {
 	waitForStatus(t, manager, StatusReady)
 	if manager.State().Commit != latestCommit {
 		t.Fatalf("pull did not reach latest main: %+v", manager.State())
+	}
+}
+
+func TestDevelopmentInstallFallsBackForLocalExactSHAUnsupported(t *testing.T) {
+	for _, remoteURL := range []struct {
+		name string
+		url  func(string) string
+	}{
+		{name: "plain path", url: func(path string) string { return path }},
+		{name: "file URL", url: localFileURL},
+	} {
+		t.Run(remoteURL.name, func(t *testing.T) {
+			remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+			pinnedCommit := remote.head(t)
+			latestCommit := remote.commitFile(t, "js/app.js", "console.log('latest')", "update")
+			manager := testManager(t, remoteURL.url(remote.path), nil)
+			manager.initialCommit = pinnedCommit
+			var fetches initialFetchRecorder
+			manager.initialFetch = func(ctx context.Context, repository *git.Repository, options *git.FetchOptions) error {
+				callIndex := fetches.record(options)
+				err := repository.FetchContext(ctx, options)
+				if callIndex == 0 {
+					if !errors.Is(err, git.ErrExactSHA1NotSupported) {
+						t.Errorf("exact-SHA fetch error = %v, want %v", err, git.ErrExactSHA1NotSupported)
+					}
+					if count, countErr := countRepositoryObjects(repository); countErr != nil {
+						t.Errorf("count objects after rejected exact-SHA fetch: %v", countErr)
+					} else if count != 0 {
+						t.Errorf("rejected exact-SHA fetch downloaded %d objects", count)
+					}
+				}
+				return err
+			}
+
+			if err := manager.StartInstall(); err != nil {
+				t.Fatal(err)
+			}
+			waitForStatus(t, manager, StatusReady)
+			if manager.State().Commit != pinnedCommit {
+				t.Fatalf("fallback did not checkout pinned commit: %+v", manager.State())
+			}
+			assertInitialFetchCalls(t, fetches.snapshot(), []initialFetchCall{
+				{
+					remoteName: "origin",
+					refSpecs:   []config.RefSpec{config.RefSpec(pinnedCommit + ":" + gameRemoteReference.String())},
+					depth:      1,
+					noTags:     true,
+				},
+				{
+					remoteName: "origin",
+					refSpecs:   []config.RefSpec{gameFetchRefSpec},
+					depth:      0,
+					noTags:     true,
+				},
+			})
+			installed, err := git.PlainOpen(manager.paths.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := installed.CommitObject(plumbing.NewHash(latestCommit)); err != nil {
+				t.Fatalf("full-main fallback did not fetch latest commit: %v", err)
+			}
+			assertDevelopmentRepositoryMetadata(t, installed, pinnedCommit)
+
+			if err := manager.StartCheckForUpdate(); err != nil {
+				t.Fatal(err)
+			}
+			waitForStatus(t, manager, StatusUpdateAvailable)
+			if manager.State().RemoteCommit != latestCommit {
+				t.Fatalf("fallback update check did not find latest main: %+v", manager.State())
+			}
+			if err := manager.StartUpdate(); err != nil {
+				t.Fatal(err)
+			}
+			waitForStatus(t, manager, StatusReady)
+			if manager.State().Commit != latestCommit {
+				t.Fatalf("fallback update did not reach latest main: %+v", manager.State())
+			}
+		})
+	}
+}
+
+func TestDevelopmentInstallCancellationDoesNotFallback(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager := testManager(t, remote.path, nil)
+	manager.initialCommit = remote.head(t)
+	started := make(chan struct{})
+	var fetches initialFetchRecorder
+	manager.initialFetch = func(ctx context.Context, _ *git.Repository, options *git.FetchOptions) error {
+		fetches.record(options)
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	manager.CancelInstall()
+	waitForStatus(t, manager, StatusCancelled)
+	assertSingleExactFetchAndNoInstallation(t, manager, fetches.snapshot())
+}
+
+func TestDevelopmentInstallNonCapabilityErrorsDoNotFallback(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		fetchError error
+	}{
+		{name: "network failure", fetchError: errors.New("test network failure")},
+		{name: "already up to date without commit", fetchError: git.NoErrAlreadyUpToDate},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+			manager := testManager(t, remote.path, nil)
+			manager.initialCommit = remote.head(t)
+			var fetches initialFetchRecorder
+			manager.initialFetch = func(_ context.Context, _ *git.Repository, options *git.FetchOptions) error {
+				fetches.record(options)
+				return testCase.fetchError
+			}
+
+			if err := manager.StartInstall(); err != nil {
+				t.Fatal(err)
+			}
+			waitForStatus(t, manager, StatusError)
+			if manager.State().Error == "" {
+				t.Fatal("failed development install did not report an error")
+			}
+			assertSingleExactFetchAndNoInstallation(t, manager, fetches.snapshot())
+		})
+	}
+}
+
+func TestDevelopmentInstallFallbackFailuresDoNotActivateSource(t *testing.T) {
+	t.Run("fallback fetch fails", func(t *testing.T) {
+		remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+		manager := testManager(t, remote.path, nil)
+		manager.initialCommit = remote.head(t)
+		fallbackError := errors.New("test fallback failure")
+		var fetches initialFetchRecorder
+		manager.initialFetch = func(_ context.Context, _ *git.Repository, options *git.FetchOptions) error {
+			callIndex := fetches.record(options)
+			if callIndex == 0 {
+				return git.ErrExactSHA1NotSupported
+			}
+			return fallbackError
+		}
+
+		if err := manager.StartInstall(); err != nil {
+			t.Fatal(err)
+		}
+		waitForStatus(t, manager, StatusError)
+		if !strings.Contains(manager.State().Error, fallbackError.Error()) {
+			t.Fatalf("install error = %q, want fallback error", manager.State().Error)
+		}
+		assertExactThenFullMainFetches(t, fetches.snapshot(), manager.initialCommit)
+		assertNoInstalledSource(t, manager)
+	})
+
+	t.Run("pinned commit is absent from main", func(t *testing.T) {
+		remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+		manager := testManager(t, remote.path, nil)
+		manager.initialCommit = strings.Repeat("1", 40)
+		var fetches initialFetchRecorder
+		manager.initialFetch = func(ctx context.Context, repository *git.Repository, options *git.FetchOptions) error {
+			fetches.record(options)
+			return repository.FetchContext(ctx, options)
+		}
+
+		if err := manager.StartInstall(); err != nil {
+			t.Fatal(err)
+		}
+		waitForStatus(t, manager, StatusError)
+		if !strings.Contains(manager.State().Error, "read development initial commit") {
+			t.Fatalf("install error = %q, want missing pinned commit error", manager.State().Error)
+		}
+		assertExactThenFullMainFetches(t, fetches.snapshot(), manager.initialCommit)
+		assertNoInstalledSource(t, manager)
+	})
+}
+
+func TestProductionInstallDoesNotUseDevelopmentInitialFetch(t *testing.T) {
+	if developmentInitialGameCommit != "" {
+		t.Skip("production-only behavior")
+	}
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.repositoryURL = remote.path
+	var fetches initialFetchRecorder
+	manager.initialFetch = func(_ context.Context, _ *git.Repository, options *git.FetchOptions) error {
+		fetches.record(options)
+		return errors.New("development initial fetch must not run in production")
+	}
+
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	if calls := fetches.snapshot(); len(calls) != 0 {
+		t.Fatalf("production install used development initial fetch: %+v", calls)
+	}
+	if manager.State().Commit != remote.head(t) {
+		t.Fatalf("production install did not clone main tip: %+v", manager.State())
 	}
 }
 
@@ -476,6 +715,170 @@ func TestGitProgressReporterShowsPackfileReceiveAfterCompression(t *testing.T) {
 	if state.ProgressPhase != "接收 Git objects" || state.ProgressPercent != 12 || state.ProgressText != "Receiving objects: 12% (13118/109319)" {
 		t.Fatalf("real receive progress did not replace synthetic phase: %+v", state)
 	}
+}
+
+type initialFetchCall struct {
+	remoteName string
+	refSpecs   []config.RefSpec
+	depth      int
+	noTags     bool
+}
+
+type initialFetchRecorder struct {
+	mu    sync.Mutex
+	calls []initialFetchCall
+}
+
+func (recorder *initialFetchRecorder) record(options *git.FetchOptions) int {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	call := initialFetchCall{
+		remoteName: options.RemoteName,
+		refSpecs:   append([]config.RefSpec(nil), options.RefSpecs...),
+		depth:      options.Depth,
+		noTags:     options.Tags == git.NoTags,
+	}
+	recorder.calls = append(recorder.calls, call)
+	return len(recorder.calls) - 1
+}
+
+func (recorder *initialFetchRecorder) snapshot() []initialFetchCall {
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	calls := make([]initialFetchCall, len(recorder.calls))
+	for index, call := range recorder.calls {
+		calls[index] = call
+		calls[index].refSpecs = append([]config.RefSpec(nil), call.refSpecs...)
+	}
+	return calls
+}
+
+func assertInitialFetchCalls(t *testing.T, got, want []initialFetchCall) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("initial fetch call count = %d, want %d; calls=%+v", len(got), len(want), got)
+	}
+	for index := range want {
+		if got[index].remoteName != want[index].remoteName || got[index].depth != want[index].depth || got[index].noTags != want[index].noTags {
+			t.Errorf("initial fetch call %d = %+v, want %+v", index, got[index], want[index])
+		}
+		if len(got[index].refSpecs) != len(want[index].refSpecs) {
+			t.Errorf("initial fetch call %d refspecs = %v, want %v", index, got[index].refSpecs, want[index].refSpecs)
+			continue
+		}
+		for refIndex := range want[index].refSpecs {
+			if got[index].refSpecs[refIndex] != want[index].refSpecs[refIndex] {
+				t.Errorf("initial fetch call %d refspecs = %v, want %v", index, got[index].refSpecs, want[index].refSpecs)
+				break
+			}
+		}
+	}
+}
+
+func assertSingleExactFetchAndNoInstallation(t *testing.T, manager *gameManager, calls []initialFetchCall) {
+	t.Helper()
+	assertInitialFetchCalls(t, calls, []initialFetchCall{{
+		remoteName: "origin",
+		refSpecs:   []config.RefSpec{config.RefSpec(manager.initialCommit + ":" + gameRemoteReference.String())},
+		depth:      1,
+		noTags:     true,
+	}})
+	assertNoInstalledSource(t, manager)
+}
+
+func assertExactThenFullMainFetches(t *testing.T, calls []initialFetchCall, pinnedCommit string) {
+	t.Helper()
+	assertInitialFetchCalls(t, calls, []initialFetchCall{
+		{
+			remoteName: "origin",
+			refSpecs:   []config.RefSpec{config.RefSpec(pinnedCommit + ":" + gameRemoteReference.String())},
+			depth:      1,
+			noTags:     true,
+		},
+		{
+			remoteName: "origin",
+			refSpecs:   []config.RefSpec{gameFetchRefSpec},
+			depth:      0,
+			noTags:     true,
+		},
+	})
+}
+
+func assertNoInstalledSource(t *testing.T, manager *gameManager) {
+	t.Helper()
+	if _, err := os.Lstat(manager.paths.Source); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed install left source behind: %v", err)
+	}
+	assertDirectoryEmpty(t, manager.paths.Staging)
+	if root, commit, ready := manager.ActiveVersion(); ready || root != "" || commit != "" {
+		t.Fatalf("failed install activated a version: %q %q %v", root, commit, ready)
+	}
+}
+
+func assertDevelopmentRepositoryMetadata(t *testing.T, repository *git.Repository, pinnedCommit string) {
+	t.Helper()
+	pinnedHash := plumbing.NewHash(pinnedCommit)
+	head, err := repository.Reference(plumbing.HEAD, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.Type() != plumbing.SymbolicReference || head.Target() != gameBranchReference {
+		t.Errorf("HEAD = %s, want symbolic reference to %s", head, gameBranchReference)
+	}
+	for _, referenceName := range []plumbing.ReferenceName{gameBranchReference, gameRemoteReference} {
+		reference, err := repository.Reference(referenceName, false)
+		if err != nil {
+			t.Errorf("read %s: %v", referenceName, err)
+			continue
+		}
+		if reference.Hash() != pinnedHash {
+			t.Errorf("%s = %s, want %s", referenceName, reference.Hash(), pinnedHash)
+		}
+	}
+	shallow, err := repository.Storer.Shallow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shallow) != 1 || shallow[0] != pinnedHash {
+		t.Errorf("shallow boundaries = %v, want [%s]", shallow, pinnedHash)
+	}
+	repositoryConfig, err := repository.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := repositoryConfig.Remotes["origin"]
+	if origin == nil {
+		t.Error("origin remote is not configured")
+	} else if len(origin.Fetch) != 1 || origin.Fetch[0] != gameFetchRefSpec {
+		t.Errorf("origin fetch refspecs = %v, want [%s]", origin.Fetch, gameFetchRefSpec)
+	}
+	mainBranch := repositoryConfig.Branches[gameBranch]
+	if mainBranch == nil {
+		t.Error("main branch tracking is not configured")
+	} else if mainBranch.Remote != "origin" || mainBranch.Merge != gameBranchReference {
+		t.Errorf("main branch tracking = remote %q merge %q, want origin %q", mainBranch.Remote, mainBranch.Merge, gameBranchReference)
+	}
+}
+
+func countRepositoryObjects(repository *git.Repository) (int, error) {
+	objects, err := repository.Storer.IterEncodedObjects(plumbing.AnyObject)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	err = objects.ForEach(func(plumbing.EncodedObject) error {
+		count++
+		return nil
+	})
+	return count, err
+}
+
+func localFileURL(path string) string {
+	slashPath := filepath.ToSlash(path)
+	if len(slashPath) >= 2 && slashPath[1] == ':' {
+		slashPath = "/" + slashPath
+	}
+	return (&url.URL{Scheme: "file", Path: slashPath}).String()
 }
 
 func testManager(t *testing.T, repositoryURL string, emit stateEmitter) *gameManager {
