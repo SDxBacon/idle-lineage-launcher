@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -56,12 +55,6 @@ type GameState struct {
 	Error           string     `json:"error"`
 }
 
-type legacyManifest struct {
-	SchemaVersion int    `json:"schemaVersion"`
-	Repository    string `json:"repository"`
-	Commit        string `json:"commit"`
-}
-
 type stateEmitter func(GameState)
 
 type gameManager struct {
@@ -74,7 +67,6 @@ type gameManager struct {
 	emit          stateEmitter
 	state         GameState
 	activeRoot    string
-	legacyInstall bool
 	cancel        context.CancelFunc
 	running       bool
 	wg            sync.WaitGroup
@@ -91,7 +83,7 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 		emit:          emit,
 		state: GameState{
 			Status:  StatusMissing,
-			Message: "尚未安裝遊戲內容",
+			Message: "尚未下載遊戲",
 		},
 	}
 	logger.Info("initializing game manager", "root", paths.Root, "source", paths.Source, "development_commit", developmentInitialGameCommit)
@@ -99,7 +91,7 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 		logger.Error("game manager initialization failed", "error", err)
 		m.state = GameState{Status: StatusError, Message: "無法載入既有安裝", Error: err.Error()}
 	} else {
-		logger.Info("game manager initialized", "status", m.state.Status, "commit", m.state.Commit, "legacy", m.legacyInstall)
+		logger.Info("game manager initialized", "status", m.state.Status, "commit", m.state.Commit)
 	}
 	return m, nil
 }
@@ -132,8 +124,6 @@ func (m *gameManager) initialise() error {
 		if err != nil {
 			return fmt.Errorf("read installed Git revision: %w", err)
 		}
-		_ = os.Remove(legacyManifestPath(m.paths))
-		_ = os.RemoveAll(filepath.Join(m.paths.Game, "versions"))
 		m.activeRoot = m.paths.Source
 		m.state = GameState{Status: StatusReady, Commit: head.Hash().String(), Message: "遊戲已可離線使用"}
 		m.logger.Info("loaded installed Git revision", "commit", head.Hash().String())
@@ -142,69 +132,13 @@ func (m *gameManager) initialise() error {
 	if !errors.Is(err, git.ErrRepositoryNotExists) {
 		return fmt.Errorf("open installed Git repository: %w", err)
 	}
-
-	manifest, err := readLegacyManifest(m.paths)
-	if errors.Is(err, os.ErrNotExist) {
+	if _, statErr := os.Lstat(m.paths.Source); errors.Is(statErr, os.ErrNotExist) {
 		m.logger.Info("no installed game found")
-		if err := os.RemoveAll(filepath.Join(m.paths.Game, "versions")); err != nil {
-			return fmt.Errorf("remove orphaned legacy game versions: %w", err)
-		}
-		if err := os.RemoveAll(m.paths.Source); err != nil {
-			return fmt.Errorf("remove game source without Git metadata: %w", err)
-		}
 		return nil
+	} else if statErr != nil {
+		return fmt.Errorf("inspect installed game directory: %w", statErr)
 	}
-	if err != nil {
-		return err
-	}
-	if err := m.migrateLegacyVersion(manifest.Commit); err != nil {
-		return err
-	}
-	if err := validateGameRoot(m.paths.Source); err != nil {
-		return fmt.Errorf("validate legacy game: %w", err)
-	}
-	m.legacyInstall = true
-	m.logger.Info("loaded legacy game installation", "commit", manifest.Commit)
-	m.activeRoot = m.paths.Source
-	m.state = GameState{Status: StatusReady, Commit: manifest.Commit, Message: "遊戲已可離線使用"}
-	return nil
-}
-
-func readLegacyManifest(paths dataPaths) (legacyManifest, error) {
-	contents, err := os.ReadFile(legacyManifestPath(paths))
-	if err != nil {
-		return legacyManifest{}, err
-	}
-	var manifest legacyManifest
-	if err := json.Unmarshal(contents, &manifest); err != nil {
-		return legacyManifest{}, fmt.Errorf("decode legacy active version: %w", err)
-	}
-	if manifest.SchemaVersion != 1 || manifest.Repository != gameRepository || !validCommit(manifest.Commit) {
-		return legacyManifest{}, errors.New("legacy active version manifest is invalid")
-	}
-	return manifest, nil
-}
-
-func legacyManifestPath(paths dataPaths) string {
-	return filepath.Join(paths.Game, "active.json")
-}
-
-func (m *gameManager) migrateLegacyVersion(commit string) error {
-	m.logger.Info("checking legacy game layout", "commit", commit)
-	legacyVersions := filepath.Join(m.paths.Game, "versions")
-	if validateGameRoot(m.paths.Source) != nil {
-		legacyRoot := filepath.Join(legacyVersions, commit)
-		if err := validateGameRoot(legacyRoot); err == nil {
-			m.logger.Info("migrating legacy version directory", "from", legacyRoot, "to", m.paths.Source)
-			if err := os.Rename(legacyRoot, m.paths.Source); err != nil {
-				return fmt.Errorf("migrate active game to src: %w", err)
-			}
-		}
-	}
-	if err := os.RemoveAll(legacyVersions); err != nil {
-		return fmt.Errorf("remove legacy game versions: %w", err)
-	}
-	return nil
+	return errors.New("game directory exists but is not a valid Git working tree")
 }
 
 func (m *gameManager) State() GameState {
@@ -220,6 +154,25 @@ func (m *gameManager) ActiveVersion() (root, commit string, ok bool) {
 		return "", "", false
 	}
 	return m.activeRoot, m.state.Commit, true
+}
+
+// withLaunchableRoot keeps update state transitions out of the launch critical
+// section. If a pull wins the lock first, the launch is rejected as updating;
+// if launch wins first, the pull cannot begin changing files until the system
+// opener has accepted or rejected the request.
+func (m *gameManager) withLaunchableRoot(open func(string) error) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	switch m.state.Status {
+	case StatusReady, StatusChecking, StatusUpdateAvailable:
+	default:
+		return fmt.Errorf("game cannot be launched while status is %q", m.state.Status)
+	}
+	if m.activeRoot == "" {
+		return errors.New("game is not installed")
+	}
+	return open(m.activeRoot)
 }
 
 func (m *gameManager) StartInstall() error {
@@ -241,7 +194,7 @@ func (m *gameManager) StartInstall() error {
 
 	go func() {
 		defer m.wg.Done()
-		fallback := GameState{Status: StatusMissing, Message: "尚未安裝遊戲內容"}
+		fallback := GameState{Status: StatusMissing, Message: "尚未下載遊戲"}
 		m.finishJob("install", m.cloneAndActivate(ctx), fallback, "安裝失敗", "已取消安裝；可隨時重新開始")
 	}()
 	return nil
@@ -409,10 +362,6 @@ func (m *gameManager) cloneAndActivate(ctx context.Context) error {
 	if err := m.replaceSource(staging); err != nil {
 		return err
 	}
-	m.mu.Lock()
-	m.legacyInstall = false
-	m.mu.Unlock()
-	_ = os.Remove(legacyManifestPath(m.paths))
 	return m.activate(head.Hash().String(), "安裝完成，可離線啟動")
 }
 
@@ -480,14 +429,8 @@ func (m *gameManager) checkoutInitialCommit(ctx context.Context, repository *git
 
 func (m *gameManager) checkForUpdate(ctx context.Context) error {
 	m.mu.RLock()
-	legacy := m.legacyInstall
 	localCommit := m.state.Commit
 	m.mu.RUnlock()
-	if legacy {
-		m.logger.Info("legacy installation requires Git conversion", "commit", localCommit)
-		m.setUpdateState(localCommit, true, "既有安裝需轉換一次；更新時會建立 Git working tree")
-		return nil
-	}
 
 	repository, err := git.PlainOpen(m.paths.Source)
 	if err != nil {
@@ -562,14 +505,6 @@ func (m *gameManager) setUpdateState(remoteCommit string, available bool, messag
 }
 
 func (m *gameManager) update(ctx context.Context) error {
-	m.mu.RLock()
-	legacy := m.legacyInstall
-	m.mu.RUnlock()
-	if legacy {
-		m.logger.Info("updating legacy installation by replacing it with a clone")
-		return m.cloneAndActivate(ctx)
-	}
-
 	m.logger.Info("opening game working tree for pull", "source", m.paths.Source)
 	repository, err := git.PlainOpen(m.paths.Source)
 	if err != nil {
@@ -608,17 +543,21 @@ func (m *gameManager) update(ctx context.Context) error {
 		return fmt.Errorf("read updated revision: %w", err)
 	}
 	m.logger.Info("pull completed", "commit", head.Hash().String())
-	return m.activate(head.Hash().String(), "更新完成，已載入最新版本")
+	return m.activate(head.Hash().String(), "更新完成；請重新整理或重新開啟瀏覽器頁面")
 }
 
 func (m *gameManager) replaceSource(staging string) error {
 	m.logger.Info("replacing active game source", "staging", staging, "destination", m.paths.Source)
-	backup := filepath.Join(m.paths.Staging, ".previous-src")
+	backup := filepath.Join(m.paths.Staging, ".previous-game")
 	if err := os.RemoveAll(backup); err != nil {
 		return fmt.Errorf("clean previous game backup: %w", err)
 	}
 
-	hadSource := validateGameRoot(m.paths.Source) == nil
+	_, sourceErr := os.Lstat(m.paths.Source)
+	hadSource := sourceErr == nil
+	if sourceErr != nil && !errors.Is(sourceErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect current game source: %w", sourceErr)
+	}
 	if hadSource {
 		m.logger.Info("backing up current game source", "backup", backup)
 		if err := os.Rename(m.paths.Source, backup); err != nil {

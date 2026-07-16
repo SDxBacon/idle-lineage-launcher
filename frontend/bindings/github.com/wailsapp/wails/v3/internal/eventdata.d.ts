@@ -13,7 +13,6 @@ declare module "@wailsio/runtime" {
     namespace Events {
         interface CustomEvents {
             "launcher:game-state": main$0.GameState;
-            "launcher:reload-game": {};
         }
     }
 }

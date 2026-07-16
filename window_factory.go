@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"sync"
 
@@ -9,44 +8,39 @@ import (
 )
 
 type windowFactory struct {
-	mu      sync.Mutex
-	app     *application.App
-	counter uint64
+	mu  sync.Mutex
+	app *application.App
 }
 
 func (factory *windowFactory) Create() application.Window {
 	factory.mu.Lock()
-	factory.counter++
-	number := factory.counter
-	factory.mu.Unlock()
-	slog.Info("creating game window", "window_number", number)
+	defer factory.mu.Unlock()
+	if window, exists := factory.app.Window.GetByName("launcher-window"); exists {
+		return window
+	}
+	slog.Info("creating launcher window")
 
 	window := factory.app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:            fmt.Sprintf("game-window-%d", number),
+		Name:            "launcher-window",
 		Title:           "Idle Lineage Launcher",
-		Width:           1600,
-		Height:          900,
-		MinWidth:        1024,
-		MinHeight:       720,
+		Width:           900,
+		Height:          720,
+		MinWidth:        720,
+		MinHeight:       600,
 		URL:             "/",
 		InitialPosition: application.WindowCentered,
 		BackgroundColour: application.NewRGB(
 			8, 12, 18,
 		),
 		DefaultContextMenuDisabled: true,
-		KeyBindings: map[string]func(application.Window){
-			"CmdOrCtrl+N": func(application.Window) {
-				factory.Create()
-			},
-			"CmdOrCtrl+R": func(window application.Window) {
-				window.EmitEvent("launcher:reload-game")
-			},
-			"F11": func(window application.Window) {
-				window.ToggleFullscreen()
-			},
-		},
-		OpenInspectorOnStartup: true,
 	})
-	slog.Info("game window created", "window_number", number)
+	slog.Info("launcher window created")
 	return window
+}
+
+func (factory *windowFactory) ShowAndFocus() {
+	window := factory.Create()
+	window.Show()
+	window.Restore()
+	window.Focus()
 }

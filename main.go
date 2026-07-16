@@ -16,7 +16,6 @@ var appIcon []byte
 
 func init() {
 	application.RegisterEvent[GameState]("launcher:game-state")
-	application.RegisterEvent[struct{}]("launcher:reload-game")
 }
 
 func main() {
@@ -38,7 +37,7 @@ func main() {
 	}
 
 	windows := &windowFactory{}
-	service := &LauncherService{manager: manager, windows: windows}
+	service := &LauncherService{manager: manager}
 	app = application.New(application.Options{
 		Name:        "Idle Lineage Launcher",
 		Description: "Desktop launcher for Idle Lineage Class",
@@ -47,8 +46,7 @@ func main() {
 			application.NewService(service),
 		},
 		Assets: application.AssetOptions{
-			Handler:    application.AssetFileServerFS(assets),
-			Middleware: gameAssetMiddleware(manager),
+			Handler: application.AssetFileServerFS(assets),
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
@@ -59,7 +57,7 @@ func main() {
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "com.sdxbacon.idle-lineage-launcher",
 			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
-				windows.Create().Focus()
+				windows.ShowAndFocus()
 			},
 		},
 		OnShutdown: func() {
@@ -68,6 +66,7 @@ func main() {
 			slog.Info("launcher shutdown callback completed")
 		},
 	})
+	service.openFile = app.Browser.OpenFile
 	windows.app = app
 	windows.Create()
 	if _, _, installed := manager.ActiveVersion(); installed {

@@ -44,14 +44,7 @@ func resolveDataPaths() (dataPaths, error) {
 	}
 
 	root := filepath.Join(base, dataDirectoryName)
-	game := filepath.Join(root, "game")
-	return dataPaths{
-		Root:    root,
-		Game:    game,
-		Source:  filepath.Join(game, "src"),
-		Staging: filepath.Join(game, "staging"),
-		WebView: filepath.Join(root, "webview"),
-	}, nil
+	return makeDataPaths(root), nil
 }
 
 func makeDataPaths(root string) dataPaths {
@@ -59,7 +52,7 @@ func makeDataPaths(root string) dataPaths {
 	return dataPaths{
 		Root:    root,
 		Game:    game,
-		Source:  filepath.Join(game, "src"),
+		Source:  filepath.Join(game, "shines871"),
 		Staging: filepath.Join(game, "staging"),
 		WebView: filepath.Join(root, "webview"),
 	}

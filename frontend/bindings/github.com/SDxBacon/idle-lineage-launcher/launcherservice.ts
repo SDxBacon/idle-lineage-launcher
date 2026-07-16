@@ -17,14 +17,14 @@ export function CheckForUpdate(): $CancellablePromise<void> {
     return $Call.ByID(4076042935);
 }
 
-export function CreateGameWindow(): $CancellablePromise<void> {
-    return $Call.ByID(515728507);
-}
-
 export function GetGameState(): $CancellablePromise<$models.GameState> {
     return $Call.ByID(1448081722).then(($result: any) => {
         return $$createType0($result);
     });
+}
+
+export function LaunchGame(): $CancellablePromise<void> {
+    return $Call.ByID(2893946080);
 }
 
 export function StartInstall(): $CancellablePromise<void> {

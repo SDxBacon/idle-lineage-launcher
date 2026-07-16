@@ -1,0 +1,253 @@
+package main
+
+import (
+	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestLaunchGameOpensAbsoluteInstalledEntry(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "game with spaces")
+	writeGameEntry(t, root)
+	manager := launchableManager(root, StatusReady)
+	var opened string
+	service := &LauncherService{
+		manager: manager,
+		openFile: func(path string) error {
+			opened = path
+			return nil
+		},
+	}
+
+	if err := service.LaunchGame(); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.Abs(filepath.Join(root, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened != want {
+		t.Fatalf("unexpected opened path: got %q, want %q", opened, want)
+	}
+}
+
+func TestLaunchGameAllowsInstalledNonUpdatingStates(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	for _, status := range []GameStatus{StatusReady, StatusChecking, StatusUpdateAvailable} {
+		t.Run(string(status), func(t *testing.T) {
+			called := false
+			service := &LauncherService{
+				manager: launchableManager(root, status),
+				openFile: func(string) error {
+					called = true
+					return nil
+				},
+			}
+			if err := service.LaunchGame(); err != nil {
+				t.Fatal(err)
+			}
+			if !called {
+				t.Fatal("file opener was not called")
+			}
+		})
+	}
+}
+
+func TestLaunchGameRejectsUnavailableStates(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	statuses := []GameStatus{
+		StatusMissing,
+		StatusResolving,
+		StatusInstalling,
+		StatusUpdating,
+		StatusCancelled,
+		StatusError,
+	}
+	for _, status := range statuses {
+		t.Run(string(status), func(t *testing.T) {
+			called := false
+			service := &LauncherService{
+				manager: launchableManager(root, status),
+				openFile: func(string) error {
+					called = true
+					return nil
+				},
+			}
+			if err := service.LaunchGame(); err == nil {
+				t.Fatal("expected launch to be rejected")
+			}
+			if called {
+				t.Fatal("file opener was called for a rejected state")
+			}
+		})
+	}
+}
+
+func TestLaunchGameRejectsReadyStateWithoutActiveInstall(t *testing.T) {
+	service := &LauncherService{
+		manager: &gameManager{state: GameState{Status: StatusReady}},
+		openFile: func(string) error {
+			t.Fatal("file opener must not be called")
+			return nil
+		},
+	}
+	if err := service.LaunchGame(); err == nil {
+		t.Fatal("expected missing active install to be rejected")
+	}
+}
+
+func TestLaunchGameRevalidatesEntry(t *testing.T) {
+	root := t.TempDir()
+	service := &LauncherService{
+		manager: launchableManager(root, StatusReady),
+		openFile: func(string) error {
+			t.Fatal("file opener must not be called")
+			return nil
+		},
+	}
+	if err := service.LaunchGame(); err == nil {
+		t.Fatal("expected missing index.html to be rejected")
+	}
+
+	if err := os.Mkdir(filepath.Join(root, "index.html"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.LaunchGame(); err == nil {
+		t.Fatal("expected a non-regular index.html to be rejected")
+	}
+}
+
+func TestLaunchGameRejectsEntrySymlinkOutsideRoot(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "game")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside.html")
+	if err := os.WriteFile(outside, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "index.html")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	service := &LauncherService{
+		manager: launchableManager(root, StatusReady),
+		openFile: func(string) error {
+			t.Fatal("file opener must not be called")
+			return nil
+		},
+	}
+	if err := service.LaunchGame(); err == nil {
+		t.Fatal("expected escaping symlink to be rejected")
+	}
+}
+
+func TestLaunchGameAllowsEntrySymlinkInsideRoot(t *testing.T) {
+	root := t.TempDir()
+	realEntry := filepath.Join(root, "game.html")
+	if err := os.WriteFile(realEntry, []byte("game"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realEntry, filepath.Join(root, "index.html")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	called := false
+	service := &LauncherService{
+		manager: launchableManager(root, StatusReady),
+		openFile: func(string) error {
+			called = true
+			return nil
+		},
+	}
+	if err := service.LaunchGame(); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("file opener was not called")
+	}
+}
+
+func TestLaunchGameReturnsFileOpenerError(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	want := errors.New("opener failed")
+	service := &LauncherService{
+		manager: launchableManager(root, StatusReady),
+		openFile: func(string) error {
+			return want
+		},
+	}
+	if err := service.LaunchGame(); !errors.Is(err, want) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLaunchGameAndUpdateHaveDefinedOrdering(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	manager := launchableManager(root, StatusUpdateAvailable)
+	openerEntered := make(chan struct{})
+	releaseOpener := make(chan struct{})
+	service := &LauncherService{
+		manager: manager,
+		openFile: func(string) error {
+			close(openerEntered)
+			<-releaseOpener
+			return nil
+		},
+	}
+
+	launchDone := make(chan error, 1)
+	go func() {
+		launchDone <- service.LaunchGame()
+	}()
+	<-openerEntered
+
+	updateAttempted := make(chan struct{})
+	updateDone := make(chan error, 1)
+	go func() {
+		close(updateAttempted)
+		updateDone <- manager.StartUpdate()
+	}()
+	<-updateAttempted
+	select {
+	case err := <-updateDone:
+		t.Fatalf("update began before the system opener returned: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(releaseOpener)
+	if err := <-launchDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateDone; err != nil {
+		t.Fatal(err)
+	}
+	manager.Shutdown()
+}
+
+func launchableManager(root string, status GameStatus) *gameManager {
+	return &gameManager{
+		activeRoot: root,
+		paths:      dataPaths{Source: root},
+		logger:     slog.Default(),
+		state:      GameState{Status: status, Commit: testCommitHash},
+	}
+}
+
+func writeGameEntry(t *testing.T, root string) {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("game"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const testCommitHash = "0123456789abcdef0123456789abcdef01234567"

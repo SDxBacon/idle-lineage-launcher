@@ -23,14 +23,13 @@ html,
 body,
 #root {
   width: 100%;
+  min-width: 320px;
   height: 100%;
+  min-height: 100%;
   margin: 0;
-  overflow: hidden;
 }
 
 body {
-  min-width: 320px;
-  min-height: 100%;
   user-select: none;
 }
 
@@ -40,21 +39,20 @@ button {
 
 button:disabled {
   cursor: default;
-  opacity: 0.58;
+  opacity: 0.52;
 }
 
 .status-shell {
   position: relative;
   display: grid;
   width: 100%;
-  height: 100%;
-  min-height: 620px;
-  padding: 48px;
+  min-height: 100%;
+  padding: 42px;
   place-items: center;
   overflow: auto;
   background:
-    radial-gradient(circle at 22% 18%, rgba(119, 91, 62, 0.19), transparent 32%),
-    radial-gradient(circle at 78% 78%, rgba(40, 84, 96, 0.18), transparent 30%),
+    radial-gradient(circle at 18% 14%, rgba(151, 111, 67, 0.2), transparent 34%),
+    radial-gradient(circle at 82% 82%, rgba(39, 92, 106, 0.18), transparent 32%),
     linear-gradient(145deg, #0d121a, #070a0f 72%);
 }
 
@@ -62,7 +60,9 @@ button:disabled {
   position: fixed;
   inset: 0;
   opacity: 0.16;
-  background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
   background-size: 36px 36px;
   content: '';
   pointer-events: none;
@@ -70,21 +70,26 @@ button:disabled {
 
 .status-card {
   position: relative;
-  width: min(620px, 100%);
-  padding: 46px;
-  text-align: center;
+  width: min(720px, 100%);
+  padding: 42px 46px;
   border: 1px solid rgba(255, 255, 255, 0.11);
   border-radius: 28px;
-  background: rgba(14, 19, 27, 0.88);
+  background: rgba(14, 19, 27, 0.9);
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.42), inset 0 1px rgba(255, 255, 255, 0.05);
   backdrop-filter: blur(18px);
+}
+
+.launcher-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
 }
 
 .brand-mark {
   display: grid;
   width: 64px;
   height: 64px;
-  margin: 0 auto 18px;
   color: #e8d6b3;
   font-family: Georgia, serif;
   font-size: 24px;
@@ -97,7 +102,7 @@ button:disabled {
 }
 
 .eyebrow {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
   color: #b9a683;
   font-size: 11px;
   font-weight: 700;
@@ -107,52 +112,105 @@ button:disabled {
 h1 {
   margin: 0;
   font-family: Georgia, "Times New Roman", serif;
-  font-size: clamp(32px, 4vw, 44px);
+  font-size: clamp(30px, 4vw, 42px);
   font-weight: 400;
-  line-height: 1.1;
+  line-height: 1.08;
   letter-spacing: -0.025em;
 }
 
+.status-badge {
+  align-self: start;
+  padding: 7px 11px;
+  color: #aeb8c5;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.status-ready {
+  color: #b8e7ca;
+  border-color: rgba(74, 222, 128, 0.2);
+  background: rgba(20, 83, 45, 0.18);
+}
+
+.status-update_available {
+  color: #f3d9a4;
+  border-color: rgba(232, 214, 179, 0.25);
+  background: rgba(120, 83, 34, 0.2);
+}
+
+.status-error {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.22);
+  background: rgba(127, 29, 29, 0.16);
+}
+
 .lead {
-  max-width: 500px;
-  margin: 18px auto 0;
+  margin: 24px 0 0;
   color: #aab2be;
   font-size: 15px;
   line-height: 1.7;
 }
 
-.requirements {
+.loading-copy {
+  margin: 16px 0 0;
+  color: #aab2be;
+  text-align: center;
+}
+
+.requirements,
+.version-summary {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  margin: 30px 0 0;
+  margin: 28px 0 0;
 }
 
-.requirements div {
+.requirements div,
+.version-summary div {
   display: flex;
+  min-width: 0;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
   padding: 17px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.025);
 }
 
-.requirements strong {
+.requirements strong,
+.version-summary dd {
+  margin: 0;
+  overflow: hidden;
   color: #e5e7eb;
   font-size: 15px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .requirements span,
+.version-summary dt,
 .privacy-note,
 .progress-details {
   color: #7f8997;
   font-size: 12px;
 }
 
+.version-summary dt {
+  order: 2;
+}
+
 .progress-block {
-  margin-top: 30px;
+  margin-top: 28px;
+  padding: 17px;
   text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .progress-heading,
@@ -224,7 +282,6 @@ h1 {
   color: #fecaca;
   font-size: 13px;
   line-height: 1.5;
-  text-align: left;
   border: 1px solid rgba(248, 113, 113, 0.22);
   border-radius: 12px;
   background: rgba(127, 29, 29, 0.16);
@@ -233,14 +290,14 @@ h1 {
 
 .actions {
   display: flex;
-  justify-content: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 28px;
 }
 
 .primary-button,
 .secondary-button {
-  min-width: 140px;
+  min-width: 150px;
   padding: 12px 20px;
   color: #f8fafc;
   border: 1px solid transparent;
@@ -262,8 +319,14 @@ h1 {
   background: rgba(255, 255, 255, 0.045);
 }
 
-.primary-button:hover,
-.secondary-button:hover {
+.update-button {
+  color: #e8d6b3;
+  border-color: rgba(232, 214, 179, 0.28);
+  background: rgba(151, 111, 67, 0.12);
+}
+
+.primary-button:not(:disabled):hover,
+.secondary-button:not(:disabled):hover {
   filter: brightness(1.08);
 }
 
@@ -277,41 +340,8 @@ h1 {
   margin: 17px 0 0;
 }
 
-.update-toast {
-  position: absolute;
-  z-index: 4;
-  top: 18px;
-  left: 50%;
-  padding: 10px 16px;
-  color: #17130d;
-  font-size: 13px;
-  font-weight: 700;
-  border: 1px solid #e2c997;
-  border-radius: 999px;
-  background: linear-gradient(180deg, #e9d4a9, #c9aa73);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
-  cursor: pointer;
-  transform: translateX(-50%);
-}
-
-.update-progress {
-  position: absolute;
-  z-index: 4;
-  top: 18px;
-  left: 50%;
-  width: min(560px, calc(100% - 40px));
-  margin: 0;
-  padding: 13px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: 14px;
-  background: rgba(14, 19, 27, 0.94);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
-  transform: translateX(-50%);
-  backdrop-filter: blur(16px);
-}
-
 .loading-mark {
-  display: inline-block;
+  display: block;
   width: 28px;
   height: 28px;
   margin: 0 auto;
@@ -321,65 +351,59 @@ h1 {
   animation: spin 0.8s linear infinite;
 }
 
-.game-shell,
-.game-frame {
-  width: 100%;
-  height: 100%;
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
-.game-shell {
-  position: relative;
-  overflow: hidden;
-  background: #080c12;
+@keyframes slide-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(300%); }
 }
 
-.game-frame {
-  display: block;
-  border: 0;
-  background: #080c12;
+@keyframes progress-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
 }
 
-.frame-loading {
-  position: absolute;
-  z-index: 20;
-  inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 14px;
-  color: #aab2be;
-  background: #080c12;
+@media (max-width: 680px) {
+  .status-shell {
+    padding: 24px;
+  }
+
+  .status-card {
+    padding: 34px 26px;
+  }
+
+  .launcher-header {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .status-badge {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
 }
 
-.toast {
-  position: fixed;
-  z-index: 40;
-  top: 20px;
-  left: 50%;
-  max-width: min(560px, calc(100% - 40px));
-  padding: 11px 15px;
-  color: #fecaca;
-  font-size: 13px;
-  border: 1px solid rgba(248, 113, 113, 0.3);
-  border-radius: 10px;
-  background: rgba(47, 15, 18, 0.93);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
-  transform: translateX(-50%);
-}
+@media (max-width: 480px) {
+  .requirements,
+  .version-summary {
+    grid-template-columns: 1fr;
+  }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes slide-progress { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
-@keyframes progress-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  .actions {
+    flex-direction: column;
+  }
 
-@media (max-width: 620px) {
-  .status-shell { padding: 24px; }
-  .status-card { padding: 34px 24px; }
-  .requirements { grid-template-columns: 1fr; }
+  .primary-button,
+  .secondary-button {
+    width: 100%;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .loading-mark,
   .progress-track.indeterminate::after,
-  .progress-track.active > span::after { animation-duration: 2.5s; }
+  .progress-track.active > span::after {
+    animation-duration: 2.5s;
+  }
 }

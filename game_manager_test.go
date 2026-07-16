@@ -2,10 +2,7 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,8 +14,6 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
-
-const testCommit = "0123456789abcdef0123456789abcdef01234567"
 
 type localGameRepository struct {
 	path       string
@@ -46,66 +41,54 @@ func TestExistingGitVersionStartsReadyWithoutNetwork(t *testing.T) {
 	}
 }
 
-func TestGitHeadReplacesAndRemovesLegacyManifest(t *testing.T) {
-	paths := makeDataPaths(t.TempDir())
-	repository := newLocalGameRepository(t, paths.Source)
-	writeLegacyManifest(t, paths, testCommit)
-
-	manager, err := newGameManager(paths, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if manager.State().Commit != repository.head(t) {
-		t.Fatalf("manager did not use Git HEAD: %+v", manager.State())
-	}
-	if _, err := os.Stat(legacyManifestPath(paths)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy manifest was not removed: %v", err)
+func TestDataPathsUseShines871Source(t *testing.T) {
+	root := t.TempDir()
+	paths := makeDataPaths(root)
+	want := filepath.Join(root, "game", "shines871")
+	if paths.Source != want {
+		t.Fatalf("unexpected source path: got %q, want %q", paths.Source, want)
 	}
 }
 
-func TestExistingLegacyVersionMigratesToSingleSource(t *testing.T) {
+func TestLegacySrcIsIgnoredAndPreserved(t *testing.T) {
 	paths := makeDataPaths(t.TempDir())
-	legacyRoot := filepath.Join(paths.Game, "versions", testCommit)
-	writeValidGame(t, legacyRoot)
-	writeValidGame(t, filepath.Join(paths.Game, "versions", strings.Repeat("a", 40)))
-	writeLegacyManifest(t, paths, testCommit)
-
-	manager, err := newGameManager(paths, nil)
-	if err != nil {
+	legacySource := filepath.Join(paths.Game, "src")
+	newLocalGameRepository(t, legacySource)
+	marker := filepath.Join(legacySource, "legacy-marker")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	root, _, ready := manager.ActiveVersion()
-	if !ready || root != paths.Source || !manager.legacyInstall {
-		t.Fatalf("legacy game was not migrated: %q %v legacy=%v", root, ready, manager.legacyInstall)
-	}
-	if err := validateGameRoot(paths.Source); err != nil {
-		t.Fatalf("migrated source is invalid: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(paths.Game, "versions")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("legacy versions directory still exists: %v", err)
-	}
-}
-
-func TestMissingManifestRemovesOrphanedGameData(t *testing.T) {
-	paths := makeDataPaths(t.TempDir())
-	writeValidGame(t, filepath.Join(paths.Game, "versions", testCommit))
-	writeValidGame(t, paths.Source)
 
 	manager, err := newGameManager(paths, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if manager.State().Status != StatusMissing {
-		t.Fatalf("unexpected state: %+v", manager.State())
+		t.Fatalf("legacy src was treated as installed: %+v", manager.State())
 	}
-	for _, path := range []string{filepath.Join(paths.Game, "versions"), paths.Source} {
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("orphaned game data still exists at %s: %v", path, err)
-		}
+	contents, err := os.ReadFile(marker)
+	if err != nil || string(contents) != "keep" {
+		t.Fatalf("legacy src was changed: %q (%v)", contents, err)
 	}
 }
 
-func TestCloneInstallsGitWorkingTreeAndServesAssets(t *testing.T) {
+func TestInvalidShines871SourceStartsInRecoverableError(t *testing.T) {
+	paths := makeDataPaths(t.TempDir())
+	writeValidGame(t, paths.Source)
+
+	manager, err := newGameManager(paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.State().Status != StatusError || manager.State().Error == "" {
+		t.Fatalf("invalid source did not produce an error state: %+v", manager.State())
+	}
+	if err := validateGameRoot(paths.Source); err != nil {
+		t.Fatalf("invalid source was unexpectedly deleted: %v", err)
+	}
+}
+
+func TestCloneInstallsShallowGitWorkingTree(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
 	var mu sync.Mutex
 	var events []GameState
@@ -125,13 +108,15 @@ func TestCloneInstallsGitWorkingTreeAndServesAssets(t *testing.T) {
 		t.Fatalf("unexpected ready state: %+v", state)
 	}
 	if err := validateGameRoot(manager.paths.Source); err != nil {
-		t.Fatalf("game was not installed in src: %v", err)
+		t.Fatalf("game was not installed in shines871: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(manager.paths.Source, ".git")); err != nil {
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
 		t.Fatalf("clone did not retain Git metadata: %v", err)
 	}
-	if _, err := os.Stat(legacyManifestPath(manager.paths)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("clone wrote an active manifest: %v", err)
+	shallow, err := installed.Storer.Shallow()
+	if err != nil || len(shallow) == 0 {
+		t.Fatalf("clone is not shallow: %v (%v)", shallow, err)
 	}
 	mu.Lock()
 	if !containsStatus(events, StatusInstalling) || !containsStatus(events, StatusReady) {
@@ -139,13 +124,6 @@ func TestCloneInstallsGitWorkingTreeAndServesAssets(t *testing.T) {
 		t.Fatalf("missing clone events: %+v", events)
 	}
 	mu.Unlock()
-
-	request := httptest.NewRequest(http.MethodGet, "/game/js/app.js", nil)
-	response := httptest.NewRecorder()
-	serveGameAsset(manager, response, request)
-	if response.Code != http.StatusOK || response.Body.String() != "console.log('ready')" {
-		t.Fatalf("unexpected asset response: %d %q", response.Code, response.Body.String())
-	}
 }
 
 func TestConcurrentInstallRequestsUseOneJob(t *testing.T) {
@@ -323,11 +301,10 @@ func TestPullRefusesDirtyWorkingTree(t *testing.T) {
 	}
 }
 
-func TestLegacyInstallIsReplacedByCloneOnFirstUpdate(t *testing.T) {
+func TestInstallReplacesInvalidShines871SourceOnRetry(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
 	paths := makeDataPaths(t.TempDir())
 	writeValidGame(t, paths.Source)
-	writeLegacyManifest(t, paths, testCommit)
 	manager, err := newGameManager(paths, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -335,22 +312,18 @@ func TestLegacyInstallIsReplacedByCloneOnFirstUpdate(t *testing.T) {
 	manager.repositoryURL = remote.path
 	manager.initialCommit = ""
 
-	if err := manager.StartCheckForUpdate(); err != nil {
-		t.Fatal(err)
+	if manager.State().Status != StatusError {
+		t.Fatalf("expected invalid installation error, got %+v", manager.State())
 	}
-	waitForStatus(t, manager, StatusUpdateAvailable)
-	if !manager.State().UpdateAvailable {
-		t.Fatalf("legacy install did not request conversion: %+v", manager.State())
-	}
-	if err := manager.StartUpdate(); err != nil {
+	if err := manager.StartInstall(); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, StatusReady)
-	if manager.State().Commit != remote.head(t) || manager.legacyInstall {
-		t.Fatalf("legacy install was not converted: %+v", manager.State())
+	if manager.State().Commit != remote.head(t) {
+		t.Fatalf("invalid install was not replaced: %+v", manager.State())
 	}
 	if _, err := git.PlainOpen(paths.Source); err != nil {
-		t.Fatalf("converted install is not a Git working tree: %v", err)
+		t.Fatalf("recovered install is not a Git working tree: %v", err)
 	}
 }
 
@@ -514,18 +487,6 @@ func writeValidGame(t *testing.T, root string) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("game"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func writeLegacyManifest(t *testing.T, paths dataPaths, commit string) {
-	t.Helper()
-	contents := []byte(`{"schemaVersion":1,"repository":"` + gameRepository + `","commit":"` + commit + `","installedAt":"2026-01-01T00:00:00Z"}`)
-	path := legacyManifestPath(paths)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, contents, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
