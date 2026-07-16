@@ -126,11 +126,6 @@ function App() {
         )}
       </div>
 
-      <p className="privacy-note">
-        {installed
-          ? '遊戲會由系統設定的 .html 預設應用程式開啟；launcher 將保持開啟。'
-          : '不需要預先安裝 Git 或 GitHub CLI；只有按下下載後才會連線。'}
-      </p>
     </StatusShell>
   );
 }
