@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => {
     startUpdate: vi.fn(),
     cancelInstall: vi.fn(),
     launchGame: vi.fn(),
+    openGameFolder: vi.fn(),
     unsubscribe: vi.fn(),
   };
 });
@@ -52,6 +53,7 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
     StartUpdate: mocks.startUpdate,
     CancelInstall: mocks.cancelInstall,
     LaunchGame: mocks.launchGame,
+    OpenGameFolder: mocks.openGameFolder,
   },
 }));
 
@@ -59,7 +61,9 @@ type State = {
   revision: number;
   status: string;
   commit: string;
+  commitTime: string;
   remoteCommit: string;
+  remoteCommitTime: string;
   updateAvailable: boolean;
   progressPhase: string;
   progressText: string;
@@ -73,7 +77,9 @@ const state = (overrides: Partial<State> = {}): State => ({
   revision: 1,
   status: 'missing',
   commit: '',
+  commitTime: '',
   remoteCommit: '',
+  remoteCommitTime: '',
   updateAvailable: false,
   progressPhase: '',
   progressText: '',
@@ -99,6 +105,7 @@ describe('App', () => {
     mocks.startUpdate.mockResolvedValue(undefined);
     mocks.cancelInstall.mockResolvedValue(undefined);
     mocks.launchGame.mockResolvedValue(undefined);
+    mocks.openGameFolder.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -111,6 +118,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
     expect(screen.getByText('約 500–800 MB')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '遊戲資料夾' })).not.toBeInTheDocument();
     expect(mocks.startInstall).not.toHaveBeenCalled();
     expect(mocks.checkForUpdate).not.toHaveBeenCalled();
 
@@ -171,30 +179,37 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('repository 已損毀');
+    expect(screen.queryByRole('button', { name: '遊戲資料夾' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '重試下載' }));
 
     expect(mocks.startInstall).toHaveBeenCalledTimes(1);
   });
 
   it('launches and manually checks updates from the ready dashboard', async () => {
+    const localCommitTime = new Date(2026, 0, 2, 3, 4, 5).toISOString();
+    const remoteCommitTime = new Date(2026, 5, 7, 8, 9, 10).toISOString();
     mocks.getGameState.mockResolvedValue(state({
       status: 'ready',
       commit: '0123456789abcdef',
+      commitTime: localCommitTime,
       remoteCommit: 'fedcba9876543210',
+      remoteCommitTime,
       message: '遊戲已就緒',
     }));
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
-    expect(screen.getByText('01234567')).toBeInTheDocument();
-    expect(screen.getByText('fedcba98')).toBeInTheDocument();
+    expect(screen.getByText('(2026-01-02 03:04:05)')).toHaveClass('version-time');
+    expect(screen.getByText('(2026-06-07 08:09:10)')).toHaveClass('version-time');
     expect(document.querySelector('iframe')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
     fireEvent.click(screen.getByRole('button', { name: '檢查更新' }));
+    fireEvent.click(screen.getByRole('button', { name: '遊戲資料夾' }));
 
     expect(mocks.launchGame).toHaveBeenCalledTimes(1);
     expect(mocks.checkForUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.openGameFolder).toHaveBeenCalledTimes(1);
   });
 
   it('does not claim the game is current before a successful fetch', async () => {
@@ -228,6 +243,8 @@ describe('App', () => {
     expect(launchButton).toBeEnabled();
     expect(screen.getByRole('button', { name: '正在檢查更新' })).toBeDisabled();
     expect(screen.getByText('Counting objects: 30% (3/10)')).toBeInTheDocument();
+    expect(screen.queryByLabelText('遊戲版本')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '遊戲資料夾' })).toBeEnabled();
 
     fireEvent.click(launchButton);
 
@@ -246,6 +263,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: '有可用更新' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '啟動遊戲' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '遊戲資料夾' })).toBeEnabled();
 
     fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
     fireEvent.click(screen.getByRole('button', { name: '立即更新' }));
@@ -271,6 +289,7 @@ describe('App', () => {
     const updateButton = screen.getByRole('button', { name: '正在更新遊戲' });
     expect(launchButton).toBeDisabled();
     expect(updateButton).toBeDisabled();
+    expect(screen.getByRole('button', { name: '遊戲資料夾' })).toBeEnabled();
     expect(screen.getByText('Fast-forwarding files')).toBeInTheDocument();
     expect(screen.getByText('已執行 1 分 5 秒')).toBeInTheDocument();
 

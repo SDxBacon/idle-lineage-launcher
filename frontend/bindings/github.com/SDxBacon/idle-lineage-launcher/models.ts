@@ -9,7 +9,9 @@ export class GameState {
     "revision": number;
     "status": GameStatus;
     "commit": string;
+    "commitTime": string;
     "remoteCommit": string;
+    "remoteCommitTime": string;
     "updateAvailable": boolean;
     "progressPhase": string;
     "progressText": string;
@@ -29,8 +31,14 @@ export class GameState {
         if (!("commit" in $$source)) {
             this["commit"] = "";
         }
+        if (!("commitTime" in $$source)) {
+            this["commitTime"] = "";
+        }
         if (!("remoteCommit" in $$source)) {
             this["remoteCommit"] = "";
+        }
+        if (!("remoteCommitTime" in $$source)) {
+            this["remoteCommitTime"] = "";
         }
         if (!("updateAvailable" in $$source)) {
             this["updateAvailable"] = false;

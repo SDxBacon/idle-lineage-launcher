@@ -27,6 +27,10 @@ export function LaunchGame(): $CancellablePromise<void> {
     return $Call.ByID(2893946080);
 }
 
+export function OpenGameFolder(): $CancellablePromise<void> {
+    return $Call.ByID(1309839059);
+}
+
 export function StartInstall(): $CancellablePromise<void> {
     return $Call.ByID(3525102106);
 }

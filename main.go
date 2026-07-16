@@ -67,6 +67,7 @@ func main() {
 		},
 	})
 	service.openFile = app.Browser.OpenFile
+	service.openFolder = app.Env.OpenFileManager
 	windows.app = app
 	windows.Create()
 	if _, _, installed := manager.ActiveVersion(); installed {

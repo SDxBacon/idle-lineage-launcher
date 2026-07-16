@@ -10,10 +10,12 @@ import (
 )
 
 type fileOpener func(string) error
+type folderOpener func(string, bool) error
 
 type LauncherService struct {
-	manager  *gameManager
-	openFile fileOpener
+	manager    *gameManager
+	openFile   fileOpener
+	openFolder folderOpener
 }
 
 func (service *LauncherService) GetGameState() GameState {
@@ -60,6 +62,25 @@ func (service *LauncherService) LaunchGame() error {
 		}
 		return nil
 	})
+}
+
+func (service *LauncherService) OpenGameFolder() error {
+	slog.Info("backend service call", "method", "OpenGameFolder")
+	if service == nil || service.manager == nil {
+		return errors.New("game manager is unavailable")
+	}
+	root, _, installed := service.manager.ActiveVersion()
+	if !installed {
+		return errors.New("game is not installed")
+	}
+	if service.openFolder == nil {
+		return errors.New("system folder opener is unavailable")
+	}
+	slog.Info("opening installed game directory", "directory", root)
+	if err := service.openFolder(root, false); err != nil {
+		return fmt.Errorf("open game folder: %w", err)
+	}
+	return nil
 }
 
 func validatedGameEntry(root string) (string, error) {

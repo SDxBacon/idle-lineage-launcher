@@ -43,17 +43,19 @@ const (
 )
 
 type GameState struct {
-	Revision        uint64     `json:"revision"`
-	Status          GameStatus `json:"status"`
-	Commit          string     `json:"commit"`
-	RemoteCommit    string     `json:"remoteCommit"`
-	UpdateAvailable bool       `json:"updateAvailable"`
-	ProgressPhase   string     `json:"progressPhase"`
-	ProgressText    string     `json:"progressText"`
-	ProgressPercent int        `json:"progressPercent"`
-	ProgressSeconds int64      `json:"progressSeconds"`
-	Message         string     `json:"message"`
-	Error           string     `json:"error"`
+	Revision         uint64     `json:"revision"`
+	Status           GameStatus `json:"status"`
+	Commit           string     `json:"commit"`
+	CommitTime       string     `json:"commitTime"`
+	RemoteCommit     string     `json:"remoteCommit"`
+	RemoteCommitTime string     `json:"remoteCommitTime"`
+	UpdateAvailable  bool       `json:"updateAvailable"`
+	ProgressPhase    string     `json:"progressPhase"`
+	ProgressText     string     `json:"progressText"`
+	ProgressPercent  int        `json:"progressPercent"`
+	ProgressSeconds  int64      `json:"progressSeconds"`
+	Message          string     `json:"message"`
+	Error            string     `json:"error"`
 }
 
 type stateEmitter func(GameState)
@@ -132,8 +134,12 @@ func (m *gameManager) initialise() error {
 		if err != nil {
 			return fmt.Errorf("read installed Git revision: %w", err)
 		}
+		commitTime, err := repositoryCommitTime(repository, head.Hash())
+		if err != nil {
+			return fmt.Errorf("read installed Git commit time: %w", err)
+		}
 		m.activeRoot = m.paths.Source
-		m.state = GameState{Status: StatusReady, Commit: head.Hash().String(), Message: "遊戲已可離線使用"}
+		m.state = GameState{Status: StatusReady, Commit: head.Hash().String(), CommitTime: commitTime, Message: "遊戲已可離線使用"}
 		m.logger.Info("loaded installed Git revision", "commit", head.Hash().String())
 		return nil
 	}
@@ -378,12 +384,16 @@ func (m *gameManager) cloneAndActivate(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read cloned revision: %w", err)
 	}
+	commitTime, err := repositoryCommitTime(repository, head.Hash())
+	if err != nil {
+		return fmt.Errorf("read cloned commit time: %w", err)
+	}
 	m.logger.Info("cloned revision validated", "commit", head.Hash().String())
 	progress.Stage("啟用版本", "正在切換遊戲 working tree…")
 	if err := m.replaceSource(staging); err != nil {
 		return err
 	}
-	return m.activate(head.Hash().String(), "安裝完成，可離線啟動")
+	return m.activate(head.Hash().String(), commitTime, "安裝完成，可離線啟動")
 }
 
 func (m *gameManager) fetchDevelopmentRepository(ctx context.Context, staging string, progress *gitProgressReporter) (*git.Repository, error) {
@@ -497,21 +507,22 @@ func (m *gameManager) checkForUpdate(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read remote game revision: %w", err)
 	}
+	remoteObject, err := repository.CommitObject(remote.Hash())
+	if err != nil {
+		return fmt.Errorf("read remote commit: %w", err)
+	}
+	remoteCommitTime := remoteObject.Committer.When.Format(time.RFC3339)
 	m.logger.Info("comparing Git revisions", "local", head.Hash().String(), "remote", remote.Hash().String())
 	progress.Stage("比較版本", "正在比較 local HEAD 與 origin/main…")
 	if head.Hash() == remote.Hash() {
 		m.logger.Info("game is already up to date", "commit", head.Hash().String())
-		m.setUpdateState(remote.Hash().String(), false, "目前已是最新版本")
+		m.setUpdateState(remote.Hash().String(), remoteCommitTime, false, "目前已是最新版本")
 		return nil
 	}
 
 	localObject, localErr := repository.CommitObject(head.Hash())
 	if localErr != nil {
 		return fmt.Errorf("read local commit: %w", localErr)
-	}
-	remoteObject, remoteErr := repository.CommitObject(remote.Hash())
-	if remoteErr != nil {
-		return fmt.Errorf("read remote commit: %w", remoteErr)
 	}
 	behind, ancestorErr := localObject.IsAncestor(remoteObject)
 	if ancestorErr == nil && !behind {
@@ -523,12 +534,12 @@ func (m *gameManager) checkForUpdate(ctx context.Context) error {
 			return fmt.Errorf("compare local and remote revisions: %w", ancestorErr)
 		}
 	}
-	m.setUpdateState(remote.Hash().String(), true, "發現新的官方版本")
+	m.setUpdateState(remote.Hash().String(), remoteCommitTime, true, "發現新的官方版本")
 	m.logger.Info("game update available", "local", head.Hash().String(), "remote", remote.Hash().String())
 	return nil
 }
 
-func (m *gameManager) setUpdateState(remoteCommit string, available bool, message string) {
+func (m *gameManager) setUpdateState(remoteCommit, remoteCommitTime string, available bool, message string) {
 	m.mu.Lock()
 	if available {
 		m.state.Status = StatusUpdateAvailable
@@ -536,6 +547,7 @@ func (m *gameManager) setUpdateState(remoteCommit string, available bool, messag
 		m.state.Status = StatusReady
 	}
 	m.state.RemoteCommit = remoteCommit
+	m.state.RemoteCommitTime = remoteCommitTime
 	m.state.UpdateAvailable = available
 	m.state.Message = message
 	m.state.Error = ""
@@ -584,8 +596,12 @@ func (m *gameManager) update(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read updated revision: %w", err)
 	}
+	commitTime, err := repositoryCommitTime(repository, head.Hash())
+	if err != nil {
+		return fmt.Errorf("read updated commit time: %w", err)
+	}
 	m.logger.Info("pull completed", "commit", head.Hash().String())
-	return m.activate(head.Hash().String(), "更新完成；請重新整理或重新開啟瀏覽器頁面")
+	return m.activate(head.Hash().String(), commitTime, "更新完成；請重新整理或重新開啟瀏覽器頁面")
 }
 
 func (m *gameManager) replaceSource(staging string) error {
@@ -619,11 +635,18 @@ func (m *gameManager) replaceSource(staging string) error {
 	return nil
 }
 
-func (m *gameManager) activate(sha, message string) error {
+func (m *gameManager) activate(sha, commitTime, message string) error {
 	m.logger.Info("activating game revision", "commit", sha)
 	m.mu.Lock()
 	m.activeRoot = m.paths.Source
-	m.state = GameState{Status: StatusReady, Commit: sha, RemoteCommit: sha, Message: message}
+	m.state = GameState{
+		Status:           StatusReady,
+		Commit:           sha,
+		CommitTime:       commitTime,
+		RemoteCommit:     sha,
+		RemoteCommitTime: commitTime,
+		Message:          message,
+	}
 	m.advanceRevisionLocked()
 	state := m.state
 	m.mu.Unlock()
@@ -665,6 +688,14 @@ func validCommit(sha string) bool {
 	}
 	_, err := hex.DecodeString(sha)
 	return err == nil
+}
+
+func repositoryCommitTime(repository *git.Repository, hash plumbing.Hash) (string, error) {
+	commit, err := repository.CommitObject(hash)
+	if err != nil {
+		return "", err
+	}
+	return commit.Committer.When.Format(time.RFC3339), nil
 }
 
 func validateGameRoot(root string) error {

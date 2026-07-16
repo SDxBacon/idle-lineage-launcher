@@ -187,6 +187,57 @@ func TestLaunchGameReturnsFileOpenerError(t *testing.T) {
 	}
 }
 
+func TestOpenGameFolderOpensActiveInstallInEveryInstalledState(t *testing.T) {
+	for _, status := range []GameStatus{StatusReady, StatusChecking, StatusUpdateAvailable, StatusUpdating} {
+		t.Run(string(status), func(t *testing.T) {
+			root := t.TempDir()
+			var opened string
+			var selectFile bool
+			service := &LauncherService{
+				manager: launchableManager(root, status),
+				openFolder: func(path string, selectPath bool) error {
+					opened = path
+					selectFile = selectPath
+					return nil
+				},
+			}
+
+			if err := service.OpenGameFolder(); err != nil {
+				t.Fatal(err)
+			}
+			if opened != root || selectFile {
+				t.Fatalf("unexpected folder open request: path=%q selectFile=%v", opened, selectFile)
+			}
+		})
+	}
+}
+
+func TestOpenGameFolderRejectsMissingActiveInstall(t *testing.T) {
+	service := &LauncherService{
+		manager: &gameManager{state: GameState{Status: StatusMissing}},
+		openFolder: func(string, bool) error {
+			t.Fatal("folder opener must not be called")
+			return nil
+		},
+	}
+	if err := service.OpenGameFolder(); err == nil {
+		t.Fatal("expected missing install to be rejected")
+	}
+}
+
+func TestOpenGameFolderReturnsFolderOpenerError(t *testing.T) {
+	want := errors.New("folder opener failed")
+	service := &LauncherService{
+		manager: launchableManager(t.TempDir(), StatusReady),
+		openFolder: func(string, bool) error {
+			return want
+		},
+	}
+	if err := service.OpenGameFolder(); !errors.Is(err, want) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestLaunchGameAndUpdateHaveDefinedOrdering(t *testing.T) {
 	root := t.TempDir()
 	writeGameEntry(t, root)

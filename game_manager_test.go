@@ -36,7 +36,7 @@ func TestExistingGitVersionStartsReadyWithoutNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := manager.State()
-	if state.Status != StatusReady || state.Commit != commit {
+	if state.Status != StatusReady || state.Commit != commit || state.CommitTime != repository.headTime(t) {
 		t.Fatalf("unexpected state: %+v", state)
 	}
 	root, activeCommit, ready := manager.ActiveVersion()
@@ -108,7 +108,7 @@ func TestCloneInstallsShallowGitWorkingTree(t *testing.T) {
 	waitForStatus(t, manager, StatusReady)
 
 	state := manager.State()
-	if state.Commit != remote.head(t) {
+	if state.Commit != remote.head(t) || state.CommitTime != remote.headTime(t) || state.RemoteCommitTime != remote.headTime(t) {
 		t.Fatalf("unexpected ready state: %+v", state)
 	}
 	if err := validateGameRoot(manager.paths.Source); err != nil {
@@ -183,6 +183,7 @@ func TestFetchDetectsBehindAndPullUpdatesOnlyWorkingTree(t *testing.T) {
 	}
 	waitForStatus(t, manager, StatusReady)
 	oldCommit := manager.State().Commit
+	oldCommitTime := manager.State().CommitTime
 	assetBefore, err := os.ReadFile(filepath.Join(manager.paths.Source, "assets", "image.png"))
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +196,7 @@ func TestFetchDetectsBehindAndPullUpdatesOnlyWorkingTree(t *testing.T) {
 	}
 	waitForStatus(t, manager, StatusUpdateAvailable)
 	state := manager.State()
-	if !state.UpdateAvailable || state.Commit != oldCommit || state.RemoteCommit != newCommit {
+	if !state.UpdateAvailable || state.Commit != oldCommit || state.CommitTime != oldCommitTime || state.RemoteCommit != newCommit || state.RemoteCommitTime != remote.headTime(t) {
 		t.Fatalf("fetch did not identify the remote revision: %+v", state)
 	}
 	jsBefore, err := os.ReadFile(filepath.Join(manager.paths.Source, "js", "app.js"))
@@ -208,7 +209,7 @@ func TestFetchDetectsBehindAndPullUpdatesOnlyWorkingTree(t *testing.T) {
 	}
 	waitForStatus(t, manager, StatusReady)
 	state = manager.State()
-	if state.Commit != newCommit || state.UpdateAvailable {
+	if state.Commit != newCommit || state.CommitTime != remote.headTime(t) || state.RemoteCommitTime != remote.headTime(t) || state.UpdateAvailable {
 		t.Fatalf("pull did not activate the new revision: %+v", state)
 	}
 	jsAfter, err := os.ReadFile(filepath.Join(manager.paths.Source, "js", "app.js"))
@@ -514,7 +515,7 @@ func TestFetchWhenCurrentRemainsReady(t *testing.T) {
 		return state.Status == StatusReady && state.RemoteCommit != ""
 	}, "up-to-date fetch")
 	state := manager.State()
-	if state.UpdateAvailable || state.RemoteCommit != state.Commit {
+	if state.UpdateAvailable || state.RemoteCommit != state.Commit || state.RemoteCommitTime != state.CommitTime || state.CommitTime == "" {
 		t.Fatalf("unexpected update result: %+v", state)
 	}
 	waitForCondition(t, func() bool {
@@ -541,6 +542,41 @@ func TestFetchWhenCurrentRemainsReady(t *testing.T) {
 	}
 	if comparisonRevision == 0 || readyRevision <= comparisonRevision {
 		t.Fatalf("terminal revision must supersede comparison progress: comparison=%d ready=%d events=%+v", comparisonRevision, readyRevision, published)
+	}
+}
+
+func TestFailedUpdateCheckPreservesLocalCommitTime(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager := testManager(t, remote.path, nil)
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	before := manager.State()
+
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := installed.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration.Remotes["origin"].URLs = []string{filepath.Join(t.TempDir(), "missing")}
+	if err := installed.Storer.SetConfig(configuration); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, func() bool {
+		state := manager.State()
+		return state.Status == StatusReady && state.Error != ""
+	}, "failed update check")
+	after := manager.State()
+	if after.Commit != before.Commit || after.CommitTime != before.CommitTime {
+		t.Fatalf("failed update check lost local version metadata: before=%+v after=%+v", before, after)
 	}
 }
 
@@ -964,6 +1000,19 @@ func (repository *localGameRepository) head(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return head.Hash().String()
+}
+
+func (repository *localGameRepository) headTime(t *testing.T) string {
+	t.Helper()
+	head, err := repository.repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repository.repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return commit.Committer.When.Format(time.RFC3339)
 }
 
 func (repository *localGameRepository) signature() *object.Signature {

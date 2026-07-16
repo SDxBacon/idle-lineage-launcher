@@ -204,6 +204,12 @@ h1 {
   order: 2;
 }
 
+.version-time {
+  color: #7f8997;
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .progress-block {
   margin-top: 28px;
   padding: 17px;
@@ -325,6 +331,10 @@ h1 {
   background: rgba(151, 111, 67, 0.12);
 }
 
+.folder-button {
+  margin-left: auto;
+}
+
 .primary-button:not(:disabled):hover,
 .secondary-button:not(:disabled):hover {
   filter: brightness(1.08);
@@ -397,6 +407,10 @@ h1 {
   .primary-button,
   .secondary-button {
     width: 100%;
+  }
+
+  .folder-button {
+    margin-left: 0;
   }
 }
 

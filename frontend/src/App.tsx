@@ -77,7 +77,7 @@ function App() {
       <p className="lead">{gameState.message || statusDescription(status)}</p>
 
       {installed ? (
-        <VersionSummary state={gameState} />
+        status !== GameStatus.StatusChecking ? <VersionSummary state={gameState} /> : null
       ) : !installing ? (
         <div className="requirements" aria-label="下載需求">
           <div><strong>約 500–800 MB</strong><span>網路下載</span></div>
@@ -122,6 +122,13 @@ function App() {
               啟動遊戲
             </button>
             <UpdateAction state={gameState} runAction={runAction} />
+            <button
+              className="secondary-button folder-button"
+              type="button"
+              onClick={() => runAction(() => LauncherService.OpenGameFolder())}
+            >
+              遊戲資料夾
+            </button>
           </>
         )}
       </div>
@@ -139,11 +146,15 @@ function VersionSummary({ state }: { state: GameState }) {
     <dl className="version-summary" aria-label="遊戲版本">
       <div>
         <dt>本機版本</dt>
-        <dd title={state.commit || undefined}>{shortCommit(state.commit, '尚未取得')}</dd>
+        <dd title={state.commit || undefined}>
+          {formatVersion(state.commit, state.commitTime, '尚未取得')}
+        </dd>
       </div>
       <div>
         <dt>遠端版本</dt>
-        <dd title={state.remoteCommit || undefined}>{shortCommit(state.remoteCommit, '尚未檢查')}</dd>
+        <dd title={state.remoteCommit || undefined}>
+          {formatVersion(state.remoteCommit, state.remoteCommitTime, '尚未檢查')}
+        </dd>
       </div>
     </dl>
   );
@@ -309,6 +320,26 @@ function defaultProgressPhase(status: GameStatus) {
 
 function shortCommit(commit: string, fallback: string) {
   return commit ? commit.slice(0, 8) : fallback;
+}
+
+function formatVersion(commit: string, commitTime: string, fallback: string) {
+  if (!commit) return fallback;
+  const formattedTime = formatCommitTime(commitTime);
+  if (!formattedTime) return shortCommit(commit, fallback);
+  return (
+    <>
+      {shortCommit(commit, fallback)}
+      <span className="version-time"> ({formattedTime})</span>
+    </>
+  );
+}
+
+function formatCommitTime(commitTime: string) {
+  if (!commitTime) return '';
+  const date = new Date(commitTime);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 function formatElapsed(seconds: number) {
