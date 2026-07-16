@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ func gameAssetMiddleware(manager *gameManager) func(http.Handler) http.Handler {
 func serveGameAsset(manager *gameManager, response http.ResponseWriter, request *http.Request) {
 	setNoStoreHeaders(response)
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
+		slog.Warn("game asset request rejected", "reason", "method", "method", request.Method, "path", request.URL.Path)
 		response.Header().Set("Allow", "GET, HEAD")
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -29,6 +31,7 @@ func serveGameAsset(manager *gameManager, response http.ResponseWriter, request 
 
 	root, _, ready := manager.ActiveVersion()
 	if !ready {
+		slog.Warn("game asset request rejected", "reason", "not_installed", "path", request.URL.Path)
 		http.Error(response, "game is not installed", http.StatusServiceUnavailable)
 		return
 	}
@@ -38,6 +41,7 @@ func serveGameAsset(manager *gameManager, response http.ResponseWriter, request 
 		relative = "index.html"
 	}
 	if !safeRequestPath(relative) {
+		slog.Warn("game asset request rejected", "reason", "unsafe_path", "path", request.URL.Path)
 		http.Error(response, "invalid game path", http.StatusBadRequest)
 		return
 	}
@@ -91,9 +95,14 @@ func safeRequestPath(relative string) bool {
 		return false
 	}
 	for _, part := range strings.Split(relative, "/") {
-		if part == "" || part == "." || part == ".." {
+		if part == "" || part == "." || part == ".." || strings.EqualFold(part, ".git") {
 			return false
 		}
 	}
 	return true
+}
+
+func pathInside(root, target string) bool {
+	relative, err := filepath.Rel(root, target)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) && !filepath.IsAbs(relative)
 }

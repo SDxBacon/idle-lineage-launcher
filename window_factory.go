@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -18,6 +19,7 @@ func (factory *windowFactory) Create() application.Window {
 	factory.counter++
 	number := factory.counter
 	factory.mu.Unlock()
+	slog.Info("creating game window", "window_number", number)
 
 	window := factory.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:            fmt.Sprintf("game-window-%d", number),
@@ -45,5 +47,6 @@ func (factory *windowFactory) Create() application.Window {
 		},
 		OpenInspectorOnStartup: true,
 	})
+	slog.Info("game window created", "window_number", number)
 	return window
 }

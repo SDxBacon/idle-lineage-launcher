@@ -22,6 +22,7 @@ export type DockItemData = {
   label: ReactNode;
   onClick: () => void;
   className?: string;
+  disabled?: boolean;
 };
 
 type DockProps = {
@@ -77,6 +78,7 @@ function DockItem({
   label,
   onClick,
   className = '',
+  disabled = false,
   mouseX,
   spring,
   distance,
@@ -97,6 +99,7 @@ function DockItem({
       ref={ref}
       type="button"
       className={`dock-item ${className}`}
+      disabled={disabled}
       style={{ width: size, height: size }}
       onHoverStart={() => hovered.set(1)}
       onHoverEnd={() => hovered.set(0)}

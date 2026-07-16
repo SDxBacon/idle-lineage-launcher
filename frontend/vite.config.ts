@@ -20,8 +20,8 @@ export default defineConfig({
 /**
  * In production, /game/* is served by the Go asset middleware. Wails dev mode
  * points the webview directly at Vite, so the equivalent read-only route is
- * needed here for `task dev`. It reads only the active version manifest and
- * never copies game content into the frontend.
+ * needed here for `task dev`. It serves only the installed Git working tree
+ * and never copies game content into the frontend.
  */
 function gameAssetsDevPlugin(): Plugin {
   return {
@@ -56,17 +56,12 @@ async function serveDevGameAsset(request: IncomingMessage, response: ServerRespo
 
   try {
     const dataRoot = launcherDataRoot();
-    const manifest = JSON.parse(await fs.readFile(path.join(dataRoot, 'game', 'active.json'), 'utf8')) as { commit?: unknown };
-    if (typeof manifest.commit !== 'string' || !/^[0-9a-f]{40}$/.test(manifest.commit)) {
-      sendText(response, 503, 'active game version is invalid');
-      return;
-    }
-
-    const root = path.join(dataRoot, 'game', 'versions', manifest.commit);
+    const root = path.join(dataRoot, 'game', 'src');
+    await fs.readFile(path.join(root, '.git', 'HEAD'), 'utf8');
     let relative = pathname.slice('/game'.length).replace(/^\/+/, '');
     if (relative === '') relative = 'index.html';
     const parts = relative.split('/');
-    if (parts.some(part => part === '' || part === '.' || part === '..' || part.includes('\\') || part.includes('\0'))) {
+    if (parts.some(part => part === '' || part === '.' || part === '..' || part.toLowerCase() === '.git' || part.includes('\\') || part.includes('\0'))) {
       sendText(response, 400, 'invalid game path');
       return;
     }

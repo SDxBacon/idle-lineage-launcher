@@ -13,6 +13,10 @@ export function CancelInstall(): $CancellablePromise<void> {
     return $Call.ByID(2625956878);
 }
 
+export function CheckForUpdate(): $CancellablePromise<void> {
+    return $Call.ByID(4076042935);
+}
+
 export function CreateGameWindow(): $CancellablePromise<void> {
     return $Call.ByID(515728507);
 }
@@ -25,6 +29,10 @@ export function GetGameState(): $CancellablePromise<$models.GameState> {
 
 export function StartInstall(): $CancellablePromise<void> {
     return $Call.ByID(3525102106);
+}
+
+export function StartUpdate(): $CancellablePromise<void> {
+    return $Call.ByID(519653914);
 }
 
 // Private type creation functions

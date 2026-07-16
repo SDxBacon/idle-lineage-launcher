@@ -14,7 +14,6 @@ type dataPaths struct {
 	Game    string
 	Source  string
 	Staging string
-	Active  string
 	WebView string
 }
 
@@ -51,7 +50,6 @@ func resolveDataPaths() (dataPaths, error) {
 		Game:    game,
 		Source:  filepath.Join(game, "src"),
 		Staging: filepath.Join(game, "staging"),
-		Active:  filepath.Join(game, "active.json"),
 		WebView: filepath.Join(root, "webview"),
 	}, nil
 }
@@ -63,7 +61,6 @@ func makeDataPaths(root string) dataPaths {
 		Game:    game,
 		Source:  filepath.Join(game, "src"),
 		Staging: filepath.Join(game, "staging"),
-		Active:  filepath.Join(game, "active.json"),
 		WebView: filepath.Join(root, "webview"),
 	}
 }

@@ -22,8 +22,7 @@ func TestGameAssetHandlerRequiresReadyVersion(t *testing.T) {
 
 func TestGameAssetHandlerRejectsTraversalAndDirectoryListing(t *testing.T) {
 	paths := makeDataPaths(t.TempDir())
-	writeValidGame(t, paths.Source)
-	writeManifest(t, paths, testCommit)
+	repository := newLocalGameRepository(t, paths.Source)
 	if err := os.WriteFile(filepath.Join(paths.Source, "assets", "visible.txt"), []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -36,10 +35,12 @@ func TestGameAssetHandlerRejectsTraversalAndDirectoryListing(t *testing.T) {
 		path string
 		want int
 	}{
-		{path: "/game/index.html?version=" + testCommit, want: http.StatusOK},
+		{path: "/game/index.html?version=" + repository.head(t), want: http.StatusOK},
 		{path: "/game/../active.json", want: http.StatusBadRequest},
 		{path: "/game/assets", want: http.StatusNotFound},
 		{path: "/game/assets/visible.txt", want: http.StatusOK},
+		{path: "/game/.git/config", want: http.StatusBadRequest},
+		{path: "/game/.GIT/config", want: http.StatusBadRequest},
 		{path: "/game/missing.txt", want: http.StatusNotFound},
 	}
 	for _, test := range tests {

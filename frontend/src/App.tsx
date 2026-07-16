@@ -60,8 +60,8 @@ function App() {
     return () => window.clearInterval(timer);
   }, [gameState?.status, gameState?.commit, reloadKey]);
 
-  const dockItems = useMemo<DockItemData[]>(() => [
-    {
+  const dockItems = useMemo<DockItemData[]>(() => {
+    const items: DockItemData[] = [{
       label: '新增視窗',
       icon: <NewWindowIcon />,
       onClick: () => void LauncherService.CreateGameWindow().catch(error => setActionError(readError(error))),
@@ -78,14 +78,35 @@ function App() {
       label: '切換全螢幕',
       icon: <FullscreenIcon />,
       onClick: () => void Window.ToggleFullscreen().catch(error => setActionError(readError(error))),
-    },
-  ], []);
+    }];
+    if (gameState?.status === GameStatus.StatusUpdateAvailable) {
+      items.push({
+        label: '更新遊戲',
+        icon: <UpdateIcon />,
+        onClick: () => void LauncherService.StartUpdate().catch(error => setActionError(readError(error))),
+      });
+    } else if (gameState?.status === GameStatus.StatusChecking || gameState?.status === GameStatus.StatusUpdating) {
+      items.push({
+        label: gameState.status === GameStatus.StatusChecking ? '正在檢查更新' : '正在更新遊戲',
+        icon: <UpdateIcon />,
+        onClick: () => undefined,
+        disabled: true,
+      });
+    } else if (gameState?.status === GameStatus.StatusReady) {
+      items.push({
+        label: '檢查更新',
+        icon: <UpdateIcon />,
+        onClick: () => void LauncherService.CheckForUpdate().catch(error => setActionError(readError(error))),
+      });
+    }
+    return items;
+  }, [gameState?.status]);
 
   if (!gameState) {
     return <StatusShell><LoadingMark /><p>正在讀取遊戲狀態…</p>{actionError && <InlineError message={actionError} />}</StatusShell>;
   }
 
-  if (gameState.status === GameStatus.StatusReady) {
+  if (isInstalledState(gameState.status)) {
     const source = `/game/index.html?version=${encodeURIComponent(gameState.commit)}`;
     return (
       <main className="game-shell">
@@ -100,7 +121,13 @@ function App() {
           allow="autoplay; fullscreen"
         />
         <Dock items={dockItems} />
-        {actionError && <div className="toast" role="alert">{actionError}</div>}
+        {gameState.status === GameStatus.StatusUpdateAvailable && (
+          <button className="update-toast" type="button" onClick={() => void LauncherService.StartUpdate().catch(error => setActionError(readError(error)))}>發現新的官方版本，按一下即可更新</button>
+        )}
+        {(gameState.status === GameStatus.StatusChecking || gameState.status === GameStatus.StatusUpdating) && (
+          <OperationProgress state={gameState} compact />
+        )}
+        {(gameState.error || actionError) && <div className="toast" role="alert">{gameState.error || actionError}</div>}
       </main>
     );
   }
@@ -160,18 +187,22 @@ function StatusShell({ children }: { children: React.ReactNode }) {
 }
 
 function InstallProgress({ state }: { state: GameState }) {
-  const percentage = state.totalBytes > 0
-    ? Math.min(100, Math.round((state.receivedBytes / state.totalBytes) * 100))
-    : null;
+  return <OperationProgress state={state} />;
+}
+
+function OperationProgress({ state, compact = false }: { state: GameState; compact?: boolean }) {
+  const percentage = state.progressPercent >= 0 ? Math.min(100, state.progressPercent) : null;
+  const phase = state.progressPhase || (state.status === GameStatus.StatusUpdating ? 'Pull repository' : 'Clone repository');
+  const detail = state.progressText || state.message || '等待 Git server 回應…';
 
   return (
-    <div className="progress-block" aria-live="polite">
+    <div className={`progress-block ${compact ? 'update-progress' : ''}`} aria-live="polite">
       <div className="progress-heading">
-        <span>{state.status === GameStatus.StatusResolving ? '確認版本' : '下載與解壓'}</span>
+        <span>{phase}</span>
         <strong>{percentage === null ? '進行中' : `${percentage}%`}</strong>
       </div>
       <div
-        className={`progress-track ${percentage === null ? 'indeterminate' : ''}`}
+        className={`progress-track active ${percentage === null ? 'indeterminate' : ''}`}
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={100}
@@ -180,8 +211,8 @@ function InstallProgress({ state }: { state: GameState }) {
         {percentage !== null && <span style={{ width: `${percentage}%` }} />}
       </div>
       <div className="progress-details">
-        <span>{formatBytes(state.receivedBytes)}{state.totalBytes > 0 ? ` / ${formatBytes(state.totalBytes)}` : ' 已接收'}</span>
-        <span>{state.filesExtracted.toLocaleString()} 個檔案已解壓</span>
+        <span title={detail}>{detail}</span>
+        <span>{formatElapsed(state.progressSeconds)}</span>
       </div>
     </div>
   );
@@ -195,15 +226,22 @@ function LoadingMark() {
   return <span className="loading-mark" aria-hidden="true" />;
 }
 
-function formatBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / 1024 ** unit).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+function formatElapsed(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 1) return '剛剛開始';
+  if (seconds < 60) return `已執行 ${Math.floor(seconds)} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `已執行 ${minutes} 分 ${Math.floor(seconds % 60)} 秒`;
 }
 
 function readError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isInstalledState(status: GameStatus) {
+  return status === GameStatus.StatusReady
+    || status === GameStatus.StatusChecking
+    || status === GameStatus.StatusUpdateAvailable
+    || status === GameStatus.StatusUpdating;
 }
 
 function NewWindowIcon() {
@@ -216,6 +254,10 @@ function ReloadIcon() {
 
 function FullscreenIcon() {
   return <svg viewBox="0 0 24 24" fill="none" strokeWidth="1.8"><path d="M8.5 4H4v4.5M15.5 4H20v4.5M20 15.5V20h-4.5M8.5 20H4v-4.5"/></svg>;
+}
+
+function UpdateIcon() {
+  return <svg viewBox="0 0 24 24" fill="none" strokeWidth="1.8"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M5 19h14"/></svg>;
 }
 
 export default App;

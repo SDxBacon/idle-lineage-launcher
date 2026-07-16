@@ -8,9 +8,12 @@ import { Create as $Create } from "@wailsio/runtime";
 export class GameState {
     "status": GameStatus;
     "commit": string;
-    "receivedBytes": number;
-    "totalBytes": number;
-    "filesExtracted": number;
+    "remoteCommit": string;
+    "updateAvailable": boolean;
+    "progressPhase": string;
+    "progressText": string;
+    "progressPercent": number;
+    "progressSeconds": number;
     "message": string;
     "error": string;
 
@@ -22,14 +25,23 @@ export class GameState {
         if (!("commit" in $$source)) {
             this["commit"] = "";
         }
-        if (!("receivedBytes" in $$source)) {
-            this["receivedBytes"] = 0;
+        if (!("remoteCommit" in $$source)) {
+            this["remoteCommit"] = "";
         }
-        if (!("totalBytes" in $$source)) {
-            this["totalBytes"] = 0;
+        if (!("updateAvailable" in $$source)) {
+            this["updateAvailable"] = false;
         }
-        if (!("filesExtracted" in $$source)) {
-            this["filesExtracted"] = 0;
+        if (!("progressPhase" in $$source)) {
+            this["progressPhase"] = "";
+        }
+        if (!("progressText" in $$source)) {
+            this["progressText"] = "";
+        }
+        if (!("progressPercent" in $$source)) {
+            this["progressPercent"] = 0;
+        }
+        if (!("progressSeconds" in $$source)) {
+            this["progressSeconds"] = 0;
         }
         if (!("message" in $$source)) {
             this["message"] = "";
@@ -60,6 +72,9 @@ export enum GameStatus {
     StatusResolving = "resolving",
     StatusInstalling = "installing",
     StatusReady = "ready",
+    StatusChecking = "checking",
+    StatusUpdateAvailable = "update_available",
+    StatusUpdating = "updating",
     StatusCancelled = "cancelled",
     StatusError = "error",
 };
