@@ -6,6 +6,7 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 export class GameState {
+    "revision": number;
     "status": GameStatus;
     "commit": string;
     "remoteCommit": string;
@@ -19,6 +20,9 @@ export class GameState {
 
     /** Creates a new GameState instance. */
     constructor($$source: Partial<GameState> = {}) {
+        if (!("revision" in $$source)) {
+            this["revision"] = 0;
+        }
         if (!("status" in $$source)) {
             this["status"] = GameStatus.$zero;
         }

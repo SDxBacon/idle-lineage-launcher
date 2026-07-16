@@ -56,6 +56,7 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
 }));
 
 type State = {
+  revision: number;
   status: string;
   commit: string;
   remoteCommit: string;
@@ -69,6 +70,7 @@ type State = {
 };
 
 const state = (overrides: Partial<State> = {}): State => ({
+  revision: 1,
   status: 'missing',
   commit: '',
   remoteCommit: '',
@@ -288,6 +290,7 @@ describe('App', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('預設瀏覽器拒絕開啟檔案');
 
     emit('launcher:game-state', state({
+      revision: 2,
       status: 'checking',
       commit: 'local-commit',
       progressText: 'Fetching origin/main',
@@ -304,7 +307,7 @@ describe('App', () => {
     const { unmount } = render(<App />);
     await screen.findByRole('heading', { name: '尚未下載遊戲' });
 
-    emit('launcher:game-state', state({ status: 'ready', commit: 'commit-sha' }));
+    emit('launcher:game-state', state({ revision: 2, status: 'ready', commit: 'commit-sha' }));
     expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
     expect(document.querySelector('iframe')).not.toBeInTheDocument();
 
@@ -323,7 +326,7 @@ describe('App', () => {
     }));
     render(<App />);
 
-    emit('launcher:game-state', state({ status: 'ready', commit: 'newer-commit' }));
+    emit('launcher:game-state', state({ revision: 2, status: 'ready', commit: 'newer-commit' }));
     expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
 
     await act(async () => {
@@ -332,5 +335,33 @@ describe('App', () => {
 
     expect(screen.getByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '尚未下載遊戲' })).not.toBeInTheDocument();
+  });
+
+  it('drops an older progress event that arrives after the ready state', async () => {
+    mocks.getGameState.mockResolvedValue(state({ revision: 1 }));
+    render(<App />);
+    await screen.findByRole('heading', { name: '尚未下載遊戲' });
+
+    emit('launcher:game-state', state({
+      revision: 3,
+      status: 'ready',
+      commit: 'current-commit',
+      remoteCommit: 'current-commit',
+      message: '目前已是最新版本',
+    }));
+    expect(await screen.findByText('目前已是最新版本')).toBeInTheDocument();
+
+    emit('launcher:game-state', state({
+      revision: 2,
+      status: 'checking',
+      commit: 'current-commit',
+      progressPhase: '比較版本',
+      progressText: '正在比較 local HEAD 與 origin/main…',
+      message: '正在 fetch 官方 main 分支…',
+    }));
+
+    expect(screen.getByText('目前已是最新版本')).toBeInTheDocument();
+    expect(screen.queryByText('正在比較 local HEAD 與 origin/main…')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '檢查更新' })).toBeEnabled();
   });
 });

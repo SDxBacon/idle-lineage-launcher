@@ -43,6 +43,7 @@ const (
 )
 
 type GameState struct {
+	Revision        uint64     `json:"revision"`
 	Status          GameStatus `json:"status"`
 	Commit          string     `json:"commit"`
 	RemoteCommit    string     `json:"remoteCommit"`
@@ -71,6 +72,7 @@ type gameManager struct {
 	running       bool
 	wg            sync.WaitGroup
 	lastProgress  time.Time
+	revision      uint64
 }
 
 func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
@@ -93,6 +95,8 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 	} else {
 		logger.Info("game manager initialized", "status", m.state.Status, "commit", m.state.Commit)
 	}
+	m.revision = 1
+	m.state.Revision = m.revision
 	return m, nil
 }
 
@@ -187,6 +191,7 @@ func (m *gameManager) StartInstall() error {
 	m.cancel = cancel
 	m.running = true
 	m.state = GameState{Status: StatusInstalling, ProgressPhase: "準備", ProgressText: "正在連線 Git server…", ProgressPercent: -1, Message: "正在 clone 官方 main 分支…"}
+	m.advanceRevisionLocked()
 	state := m.state
 	m.wg.Add(1)
 	m.mu.Unlock()
@@ -225,6 +230,7 @@ func (m *gameManager) StartCheckForUpdate() error {
 	m.state.ProgressText = "正在連線 Git server…"
 	m.state.ProgressPercent = -1
 	m.state.ProgressSeconds = 0
+	m.advanceRevisionLocked()
 	state := m.state
 	m.wg.Add(1)
 	m.mu.Unlock()
@@ -263,6 +269,7 @@ func (m *gameManager) StartUpdate() error {
 	m.state.ProgressText = "正在連線 Git server…"
 	m.state.ProgressPercent = -1
 	m.state.ProgressSeconds = 0
+	m.advanceRevisionLocked()
 	state := m.state
 	m.wg.Add(1)
 	m.mu.Unlock()
@@ -310,6 +317,7 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 		} else {
 			m.state = GameState{Status: StatusError, Message: failureMessage, Error: err.Error()}
 		}
+		m.advanceRevisionLocked()
 	}
 	state := m.state
 	m.mu.Unlock()
@@ -499,6 +507,7 @@ func (m *gameManager) setUpdateState(remoteCommit string, available bool, messag
 	m.state.UpdateAvailable = available
 	m.state.Message = message
 	m.state.Error = ""
+	m.advanceRevisionLocked()
 	state := m.state
 	m.mu.Unlock()
 	m.publish(state)
@@ -582,6 +591,7 @@ func (m *gameManager) activate(sha, message string) error {
 	m.mu.Lock()
 	m.activeRoot = m.paths.Source
 	m.state = GameState{Status: StatusReady, Commit: sha, RemoteCommit: sha, Message: message}
+	m.advanceRevisionLocked()
 	state := m.state
 	m.mu.Unlock()
 	m.publish(state)
@@ -594,6 +604,7 @@ func (m *gameManager) updateGitProgress(phase, text string, percent int, seconds
 	m.state.ProgressText = text
 	m.state.ProgressPercent = percent
 	m.state.ProgressSeconds = seconds
+	m.advanceRevisionLocked()
 	if !force && !m.lastProgress.IsZero() && time.Since(m.lastProgress) < 100*time.Millisecond {
 		m.mu.Unlock()
 		return
@@ -602,6 +613,11 @@ func (m *gameManager) updateGitProgress(phase, text string, percent int, seconds
 	state := m.state
 	m.mu.Unlock()
 	m.publish(state)
+}
+
+func (m *gameManager) advanceRevisionLocked() {
+	m.revision++
+	m.state.Revision = m.revision
 }
 
 func (m *gameManager) publish(state GameState) {

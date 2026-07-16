@@ -253,11 +253,20 @@ func TestDevelopmentCloneStartsAtPinnedCommitThenFindsUpdate(t *testing.T) {
 
 func TestFetchWhenCurrentRemainsReady(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
-	manager := testManager(t, remote.path, nil)
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
 	if err := manager.StartInstall(); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, StatusReady)
+	mu.Lock()
+	events = nil
+	mu.Unlock()
 	if err := manager.StartCheckForUpdate(); err != nil {
 		t.Fatal(err)
 	}
@@ -268,6 +277,31 @@ func TestFetchWhenCurrentRemainsReady(t *testing.T) {
 	state := manager.State()
 	if state.UpdateAvailable || state.RemoteCommit != state.Commit {
 		t.Fatalf("unexpected update result: %+v", state)
+	}
+	waitForCondition(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, event := range events {
+			if event.Status == StatusReady && event.Message == "目前已是最新版本" {
+				return true
+			}
+		}
+		return false
+	}, "ready revision event")
+	mu.Lock()
+	published := append([]GameState(nil), events...)
+	mu.Unlock()
+	var comparisonRevision, readyRevision uint64
+	for _, event := range published {
+		if event.Status == StatusChecking && event.ProgressPhase == "比較版本" {
+			comparisonRevision = event.Revision
+		}
+		if event.Status == StatusReady && event.Message == "目前已是最新版本" {
+			readyRevision = event.Revision
+		}
+	}
+	if comparisonRevision == 0 || readyRevision <= comparisonRevision {
+		t.Fatalf("terminal revision must supersede comparison progress: comparison=%d ready=%d events=%+v", comparisonRevision, readyRevision, published)
 	}
 }
 

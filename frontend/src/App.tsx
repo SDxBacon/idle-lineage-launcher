@@ -13,20 +13,20 @@ function App() {
 
   useEffect(() => {
     let mounted = true;
-    let receivedStateEvent = false;
-    const unsubscribeState = Events.On('launcher:game-state', event => {
-      if (mounted) {
-        receivedStateEvent = true;
-        setGameState(event.data);
+    let lastRevision = -1;
+    const applyState = (state: GameState) => {
+      if (!mounted || state.revision <= lastRevision) {
+        return;
       }
+      lastRevision = state.revision;
+      setGameState(state);
+    };
+    const unsubscribeState = Events.On('launcher:game-state', event => {
+      applyState(event.data);
     });
 
     LauncherService.GetGameState()
-      .then(state => {
-        if (mounted && !receivedStateEvent) {
-          setGameState(state);
-        }
-      })
+      .then(applyState)
       .catch(error => mounted && setActionError(readError(error)));
 
     return () => {
