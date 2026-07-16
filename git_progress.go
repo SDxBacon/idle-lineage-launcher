@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -9,6 +12,13 @@ import (
 )
 
 var gitPercentPattern = regexp.MustCompile(`(?i)^([^:]+):\s*([0-9]{1,3})%`)
+
+const (
+	gitPackfileReceivePhase = "接收 Git objects"
+	gitPackfileReceiveText  = "正在下載並寫入 Git packfile"
+)
+
+const gitPackfileReceiveDelay = 1500 * time.Millisecond
 
 type gitProgressReporter struct {
 	manager   *gameManager
@@ -22,6 +32,10 @@ type gitProgressReporter struct {
 	phase            string
 	text             string
 	percent          int
+	lastGitOutput    time.Time
+	packDir          string
+	packBaseline     int64
+	syntheticReceive bool
 	lastLoggedPhase  string
 	lastLoggedBucket int
 }
@@ -38,6 +52,14 @@ func newGitProgressReporter(manager *gameManager, operation, initialText string)
 	reporter.Stage("連線", initialText)
 	go reporter.heartbeat()
 	return reporter
+}
+
+func (reporter *gitProgressReporter) WatchPackDir(packDir string) {
+	size, _ := directoryRegularFileSize(packDir)
+	reporter.mu.Lock()
+	reporter.packDir = packDir
+	reporter.packBaseline = size
+	reporter.mu.Unlock()
 }
 
 func (reporter *gitProgressReporter) Write(contents []byte) (int, error) {
@@ -85,6 +107,7 @@ func (reporter *gitProgressReporter) handleLine(line string) {
 		return
 	}
 	phase, percent := parseGitProgress(text)
+	now := time.Now()
 
 	reporter.mu.Lock()
 	if phase == "" {
@@ -93,7 +116,9 @@ func (reporter *gitProgressReporter) handleLine(line string) {
 	reporter.phase = phase
 	reporter.text = text
 	reporter.percent = percent
-	elapsed := int64(time.Since(reporter.started).Seconds())
+	reporter.lastGitOutput = now
+	reporter.syntheticReceive = false
+	elapsed := int64(now.Sub(reporter.started).Seconds())
 	bucket := -1
 	if percent >= 0 {
 		bucket = percent / 10
@@ -117,11 +142,15 @@ func (reporter *gitProgressReporter) heartbeat() {
 	for {
 		select {
 		case <-ticker.C:
+			now := time.Now()
+			if reporter.maybeShowSyntheticPackfileReceive(now) {
+				continue
+			}
 			reporter.mu.Lock()
 			phase := reporter.phase
 			text := reporter.text
 			percent := reporter.percent
-			elapsed := int64(time.Since(reporter.started).Seconds())
+			elapsed := int64(now.Sub(reporter.started).Seconds())
 			reporter.mu.Unlock()
 			if text == "" {
 				text = "等待 Git server 回應…"
@@ -131,6 +160,87 @@ func (reporter *gitProgressReporter) heartbeat() {
 			return
 		}
 	}
+}
+
+func (reporter *gitProgressReporter) maybeShowSyntheticPackfileReceive(now time.Time) bool {
+	reporter.mu.Lock()
+	alreadySynthetic := reporter.syntheticReceive
+	shouldStartSynthetic := reporter.phase == "壓縮 Git objects" &&
+		reporter.percent == 100 &&
+		!reporter.lastGitOutput.IsZero() &&
+		now.Sub(reporter.lastGitOutput) >= gitPackfileReceiveDelay
+	if !alreadySynthetic && !shouldStartSynthetic {
+		reporter.mu.Unlock()
+		return false
+	}
+	packDir := reporter.packDir
+	packBaseline := reporter.packBaseline
+	reporter.phase = gitPackfileReceivePhase
+	reporter.text = gitPackfileReceiveText + "…"
+	reporter.percent = -1
+	reporter.syntheticReceive = true
+	if shouldStartSynthetic {
+		reporter.lastLoggedPhase = gitPackfileReceivePhase
+	}
+	reporter.lastLoggedBucket = -1
+	elapsed := int64(now.Sub(reporter.started).Seconds())
+	reporter.mu.Unlock()
+
+	text := reporter.packfileReceiveText(packDir, packBaseline)
+	if shouldStartSynthetic {
+		reporter.manager.logger.Info("git stage", "operation", reporter.operation, "phase", gitPackfileReceivePhase, "detail", text)
+	}
+	reporter.manager.updateGitProgress(gitPackfileReceivePhase, text, -1, elapsed, true)
+	return true
+}
+
+func (reporter *gitProgressReporter) packfileReceiveText(packDir string, baseline int64) string {
+	written := int64(0)
+	if packDir != "" {
+		if size, err := directoryRegularFileSize(packDir); err == nil && size > baseline {
+			written = size - baseline
+		}
+	}
+	if written <= 0 {
+		return gitPackfileReceiveText + "…"
+	}
+	return fmt.Sprintf("%s… 本次已接收/寫入 %s", gitPackfileReceiveText, formatByteSize(written))
+}
+
+func directoryRegularFileSize(dir string) (int64, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var size int64
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		if info.Mode().IsRegular() {
+			size += info.Size()
+		}
+	}
+	return size, nil
+}
+
+func formatByteSize(size int64) string {
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	value := float64(size)
+	for _, suffix := range []string{"KiB", "MiB", "GiB"} {
+		value /= unit
+		if value < unit {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%.1f TiB", value/unit)
 }
 
 func parseGitProgress(text string) (string, int) {

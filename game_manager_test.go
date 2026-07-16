@@ -423,6 +423,61 @@ func TestGitProgressReporterPublishesSidebandAndHeartbeat(t *testing.T) {
 	}
 }
 
+func TestGitProgressReporterShowsPackfileReceiveAfterCompression(t *testing.T) {
+	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	manager.state = GameState{Status: StatusInstalling, ProgressPercent: -1}
+	manager.mu.Unlock()
+	var logs bytes.Buffer
+	manager.logger = slog.New(slog.NewTextHandler(&logs, nil))
+
+	packDir := filepath.Join(t.TempDir(), "objects", "pack")
+	if err := os.MkdirAll(packDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack-existing.pack"), []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reporter := newGitProgressReporter(manager, "clone", "正在連線…")
+	reporter.WatchPackDir(packDir)
+	defer reporter.Close()
+	if _, err := reporter.Write([]byte("Compressing objects: 100% (109319/109319)\r")); err != nil {
+		t.Fatal(err)
+	}
+	state := manager.State()
+	if state.ProgressPhase != "壓縮 Git objects" || state.ProgressPercent != 100 {
+		t.Fatalf("unexpected compression progress: %+v", state)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "tmp_pack_receiving"), make([]byte, 5*1024*1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reporter.mu.Lock()
+	syntheticTime := reporter.lastGitOutput.Add(gitPackfileReceiveDelay + time.Millisecond)
+	reporter.mu.Unlock()
+	if !reporter.maybeShowSyntheticPackfileReceive(syntheticTime) {
+		t.Fatal("expected synthetic packfile receive phase")
+	}
+	state = manager.State()
+	if state.ProgressPhase != gitPackfileReceivePhase || state.ProgressPercent != -1 || !strings.Contains(state.ProgressText, "5.0 MiB") {
+		t.Fatalf("unexpected synthetic receive progress: %+v", state)
+	}
+	if output := logs.String(); !strings.Contains(output, gitPackfileReceivePhase) {
+		t.Fatalf("synthetic receive phase was not logged: %s", output)
+	}
+
+	if _, err := reporter.Write([]byte("Receiving objects: 12% (13118/109319)\r")); err != nil {
+		t.Fatal(err)
+	}
+	state = manager.State()
+	if state.ProgressPhase != "接收 Git objects" || state.ProgressPercent != 12 || state.ProgressText != "Receiving objects: 12% (13118/109319)" {
+		t.Fatalf("real receive progress did not replace synthetic phase: %+v", state)
+	}
+}
+
 func testManager(t *testing.T, repositoryURL string, emit stateEmitter) *gameManager {
 	t.Helper()
 	manager, err := newGameManager(makeDataPaths(t.TempDir()), emit)

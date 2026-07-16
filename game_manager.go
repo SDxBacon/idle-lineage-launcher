@@ -333,13 +333,14 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 
 func (m *gameManager) cloneAndActivate(ctx context.Context) error {
 	m.logger.Info("starting repository clone", "url", m.repositoryURL, "branch", gameBranch, "depth", 1)
-	progress := newGitProgressReporter(m, "clone", "正在連線並下載 Git objects…")
-	defer progress.Close()
 	staging, err := os.MkdirTemp(m.paths.Staging, "clone-")
 	if err != nil {
 		return fmt.Errorf("create clone directory: %w", err)
 	}
 	defer os.RemoveAll(staging)
+	progress := newGitProgressReporter(m, "clone", "正在連線並下載 Git objects…")
+	progress.WatchPackDir(filepath.Join(staging, ".git", "objects", "pack"))
+	defer progress.Close()
 
 	repository, err := git.PlainCloneContext(ctx, staging, false, &git.CloneOptions{
 		URL:           m.repositoryURL,
@@ -446,6 +447,7 @@ func (m *gameManager) checkForUpdate(ctx context.Context) error {
 	}
 	m.logger.Info("fetching origin/main", "local_commit", localCommit)
 	progress := newGitProgressReporter(m, "fetch", "正在向 origin/main 查詢更新…")
+	progress.WatchPackDir(filepath.Join(m.paths.Source, ".git", "objects", "pack"))
 	defer progress.Close()
 	err = repository.FetchContext(ctx, &git.FetchOptions{
 		RemoteName: "origin",
@@ -532,6 +534,7 @@ func (m *gameManager) update(ctx context.Context) error {
 		return errors.New("game working tree has local changes; refusing to overwrite them")
 	}
 	progress := newGitProgressReporter(m, "pull", "正在下載並套用更新…")
+	progress.WatchPackDir(filepath.Join(m.paths.Source, ".git", "objects", "pack"))
 	defer progress.Close()
 	m.logger.Info("pulling origin/main")
 	err = worktree.PullContext(ctx, &git.PullOptions{
