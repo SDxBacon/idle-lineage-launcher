@@ -5,8 +5,9 @@ Wails v3 + React TypeScript desktop launcher for
 
 The launcher does not bundle game files. On first launch, after explicit user
 confirmation, the Go backend resolves the official `main` commit and streams
-its codeload archive into the platform application-data directory. Installed
-versions are kept under `game/versions/<sha>` and selected by `game/active.json`.
+its codeload archive into the platform application-data directory. The single
+installed game tree is kept under `game/src` and its commit is
+recorded by `game/active.json`.
 
 ## Development
 

@@ -30,8 +30,7 @@ type archiveEntry struct {
 
 func TestExistingVersionStartsReadyWithoutNetwork(t *testing.T) {
 	paths := makeDataPaths(t.TempDir())
-	versionRoot := filepath.Join(paths.Versions, testCommit)
-	writeValidGame(t, versionRoot)
+	writeValidGame(t, paths.Source)
 	writeManifest(t, paths, testCommit)
 
 	manager, err := newGameManager(paths, nil)
@@ -43,8 +42,47 @@ func TestExistingVersionStartsReadyWithoutNetwork(t *testing.T) {
 		t.Fatalf("unexpected state: %+v", state)
 	}
 	root, commit, ready := manager.ActiveVersion()
-	if !ready || root != versionRoot || commit != testCommit {
+	if !ready || root != paths.Source || commit != testCommit {
 		t.Fatalf("unexpected active version: %q %q %v", root, commit, ready)
+	}
+}
+
+func TestExistingLegacyVersionMigratesToSingleSource(t *testing.T) {
+	paths := makeDataPaths(t.TempDir())
+	legacyRoot := filepath.Join(paths.Game, "versions", testCommit)
+	writeValidGame(t, legacyRoot)
+	writeValidGame(t, filepath.Join(paths.Game, "versions", strings.Repeat("a", 40)))
+	writeManifest(t, paths, testCommit)
+
+	manager, err := newGameManager(paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _, ready := manager.ActiveVersion()
+	if !ready || root != paths.Source {
+		t.Fatalf("legacy game was not migrated: %q %v", root, ready)
+	}
+	if err := validateGameRoot(paths.Source); err != nil {
+		t.Fatalf("migrated source is invalid: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(paths.Game, "versions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy versions directory still exists: %v", err)
+	}
+}
+
+func TestMissingManifestRemovesOrphanedLegacyVersions(t *testing.T) {
+	paths := makeDataPaths(t.TempDir())
+	writeValidGame(t, filepath.Join(paths.Game, "versions", testCommit))
+
+	manager, err := newGameManager(paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.State().Status != StatusMissing {
+		t.Fatalf("unexpected state: %+v", manager.State())
+	}
+	if _, err := os.Stat(filepath.Join(paths.Game, "versions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphaned versions directory still exists: %v", err)
 	}
 }
 
@@ -82,6 +120,12 @@ func TestInstallFromGitHubEndpointsAndServeAssets(t *testing.T) {
 	manifestContents, err := os.ReadFile(manager.paths.Active)
 	if err != nil || !bytes.Contains(manifestContents, []byte(testCommit)) {
 		t.Fatalf("active manifest was not switched: %s (%v)", manifestContents, err)
+	}
+	if err := validateGameRoot(manager.paths.Source); err != nil {
+		t.Fatalf("game was not installed in src: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(manager.paths.Game, "versions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected versions directory: %v", err)
 	}
 	mu.Lock()
 	defer mu.Unlock()

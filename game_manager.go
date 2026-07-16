@@ -104,7 +104,7 @@ func defaultHTTPClient() *http.Client {
 }
 
 func (m *gameManager) initialise() error {
-	for _, dir := range []string{m.paths.Versions, m.paths.Staging} {
+	for _, dir := range []string{m.paths.Game, m.paths.Staging} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("create data directory: %w", err)
 		}
@@ -121,6 +121,9 @@ func (m *gameManager) initialise() error {
 
 	manifestBytes, err := os.ReadFile(m.paths.Active)
 	if errors.Is(err, os.ErrNotExist) {
+		if err := os.RemoveAll(filepath.Join(m.paths.Game, "versions")); err != nil {
+			return fmt.Errorf("remove orphaned legacy game versions: %w", err)
+		}
 		return nil
 	}
 	if err != nil {
@@ -133,12 +136,30 @@ func (m *gameManager) initialise() error {
 	if manifest.SchemaVersion != 1 || manifest.Repository != gameRepository || !validCommit(manifest.Commit) {
 		return errors.New("active version manifest is invalid")
 	}
-	root := filepath.Join(m.paths.Versions, manifest.Commit)
-	if err := validateGameRoot(root); err != nil {
+	if err := m.migrateLegacyVersion(manifest.Commit); err != nil {
+		return err
+	}
+	if err := validateGameRoot(m.paths.Source); err != nil {
 		return fmt.Errorf("validate active version: %w", err)
 	}
-	m.activeRoot = root
+	m.activeRoot = m.paths.Source
 	m.state = GameState{Status: StatusReady, Commit: manifest.Commit, Message: "遊戲已可離線使用"}
+	return nil
+}
+
+func (m *gameManager) migrateLegacyVersion(commit string) error {
+	legacyVersions := filepath.Join(m.paths.Game, "versions")
+	if validateGameRoot(m.paths.Source) != nil {
+		legacyRoot := filepath.Join(legacyVersions, commit)
+		if err := validateGameRoot(legacyRoot); err == nil {
+			if err := os.Rename(legacyRoot, m.paths.Source); err != nil {
+				return fmt.Errorf("migrate active game to src: %w", err)
+			}
+		}
+	}
+	if err := os.RemoveAll(legacyVersions); err != nil {
+		return fmt.Errorf("remove legacy game versions: %w", err)
+	}
 	return nil
 }
 
@@ -221,11 +242,6 @@ func (m *gameManager) install(ctx context.Context) error {
 		return err
 	}
 
-	versionRoot := filepath.Join(m.paths.Versions, sha)
-	if err := validateGameRoot(versionRoot); err == nil {
-		return m.activate(sha, versionRoot)
-	}
-
 	staging, err := os.MkdirTemp(m.paths.Staging, sha+"-")
 	if err != nil {
 		return fmt.Errorf("create staging directory: %w", err)
@@ -273,12 +289,34 @@ func (m *gameManager) install(ctx context.Context) error {
 		return fmt.Errorf("validate downloaded game: %w", err)
 	}
 
-	if err := os.Rename(staging, versionRoot); err != nil {
-		if validateGameRoot(versionRoot) != nil {
-			return fmt.Errorf("install game version: %w", err)
+	if err := m.replaceSource(staging); err != nil {
+		return err
+	}
+	return m.activate(sha, m.paths.Source)
+}
+
+func (m *gameManager) replaceSource(staging string) error {
+	backup := filepath.Join(m.paths.Staging, ".previous-src")
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("clean previous game backup: %w", err)
+	}
+
+	hadSource := validateGameRoot(m.paths.Source) == nil
+	if hadSource {
+		if err := os.Rename(m.paths.Source, backup); err != nil {
+			return fmt.Errorf("prepare current game replacement: %w", err)
 		}
 	}
-	return m.activate(sha, versionRoot)
+	if err := os.Rename(staging, m.paths.Source); err != nil {
+		if hadSource {
+			_ = os.Rename(backup, m.paths.Source)
+		}
+		return fmt.Errorf("install game source: %w", err)
+	}
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("remove previous game source: %w", err)
+	}
+	return nil
 }
 
 func (m *gameManager) resolveCommit(ctx context.Context) (string, error) {

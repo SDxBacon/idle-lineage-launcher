@@ -22,10 +22,9 @@ func TestGameAssetHandlerRequiresReadyVersion(t *testing.T) {
 
 func TestGameAssetHandlerRejectsTraversalAndDirectoryListing(t *testing.T) {
 	paths := makeDataPaths(t.TempDir())
-	root := filepath.Join(paths.Versions, testCommit)
-	writeValidGame(t, root)
+	writeValidGame(t, paths.Source)
 	writeManifest(t, paths, testCommit)
-	if err := os.WriteFile(filepath.Join(root, "assets", "visible.txt"), []byte("ok"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(paths.Source, "assets", "visible.txt"), []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	manager, err := newGameManager(paths, nil)
