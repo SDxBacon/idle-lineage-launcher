@@ -310,8 +310,9 @@ describe('App', () => {
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
-    expect(screen.getByText('(2026-01-02 03:04:05)')).toHaveClass('version-time');
-    expect(screen.getByText('(2026-06-07 08:09:10)')).toHaveClass('version-time');
+    expect(screen.getByText('2026-01-02 03:04:05')).toHaveClass('version-time');
+    expect(screen.getByText('2026-06-07 08:09:10')).toHaveClass('version-time');
+    expect(screen.getAllByText('·', { selector: '.version-separator' })).toHaveLength(2);
     expect(document.querySelector('iframe')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));

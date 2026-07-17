@@ -223,9 +223,15 @@ h1 {
   order: 2;
 }
 
+.version-separator {
+  margin: 0 7px;
+  color: #596270;
+}
+
 .version-time {
   color: #7f8997;
   font-size: 12px;
+  font-style: italic;
   font-weight: 500;
 }
 

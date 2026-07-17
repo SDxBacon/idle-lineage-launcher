@@ -423,7 +423,8 @@ function formatVersion(commit: string, commitTime: string, fallback: string) {
   return (
     <>
       {shortCommit(commit, fallback)}
-      <span className="version-time"> ({formattedTime})</span>
+      <span className="version-separator" aria-hidden="true">·</span>
+      <span className="version-time">{formattedTime}</span>
     </>
   );
 }
