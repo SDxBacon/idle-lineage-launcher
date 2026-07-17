@@ -128,6 +128,16 @@ tasks:
     cmds:
       - wails3 tool msix-install-tools
 
+  release:
+    summary: Builds the unsigned Windows amd64 portable executable
+    deps:
+      - task: build
+        vars:
+          ARCH: amd64
+    cmds:
+      - mkdir -p "release/{{.VERSION}}"
+      - cp "{{.BIN_DIR}}/{{.APP_NAME}}.exe" "release/{{.VERSION}}/{{.APP_NAME}}-windows-amd64.exe"
+
   run:
     cmds:
       - '{{.BIN_DIR}}/{{.APP_NAME}}.exe'

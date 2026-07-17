@@ -83,13 +83,18 @@ task build
 The v1 release tasks intentionally produce ad-hoc or unsigned artifacts:
 
 ```sh
+task release
+
+# Or build one platform only:
 task release:macos
 task release:windows
 ```
 
-macOS creates separate arm64 and amd64 DMGs containing the app and an
-Applications shortcut. Windows creates one amd64 portable executable. Outputs
-are written to `release/0.1.0/` and no game content is included.
+The combined `task release` command must run on macOS. It creates separate
+arm64 and amd64 DMGs containing the app and an Applications shortcut, followed
+by one cross-compiled Windows amd64 portable executable. Outputs are written to
+`release/0.1.0/` and no game content is included. Override the output version
+with, for example, `task release VERSION=0.2.0`.
 
 ## Runtime data
 

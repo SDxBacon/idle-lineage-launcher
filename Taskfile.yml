@@ -35,6 +35,17 @@ tasks:
         vars:
           SCRIPT: test
 
+  release:
+    summary: Packages macOS arm64/amd64 DMGs and a Windows amd64 portable executable
+    platforms: [darwin]
+    cmds:
+      - task: darwin:release
+        vars:
+          VERSION: "{{.VERSION}}"
+      - task: windows:release
+        vars:
+          VERSION: "{{.VERSION}}"
+
   release:macos:
     summary: Builds ad-hoc signed arm64 and amd64 DMGs
     platforms: [darwin]
@@ -46,11 +57,9 @@ tasks:
   release:windows:
     summary: Builds the unsigned Windows x64 portable executable
     cmds:
-      - task: windows:build
+      - task: windows:release
         vars:
-          ARCH: amd64
-      - mkdir -p "release/{{.VERSION}}"
-      - cp "{{.BIN_DIR}}/{{.APP_NAME}}.exe" "release/{{.VERSION}}/{{.APP_NAME}}-windows-amd64.exe"
+          VERSION: "{{.VERSION}}"
 
   run:
     summary: Runs the application
