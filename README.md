@@ -23,19 +23,26 @@
 
 ## 使用方式
 
-操作示範請觀看 [How to Use 教學影片](https://www.youtube.com/watch?v=lSfKQv8IMv4)。
-
 1. 開啟啟動器。
 2. 尚未安裝遊戲時，點選「下載遊戲」。
 3. 有新版本時，點選更新即可同步至官方最新版本。
 4. 點選「啟動遊戲」，使用系統預設瀏覽器遊玩。
+
+或著，請看操作示範影片
+
+<video src="https://www.youtube.com/watch?v=lSfKQv8IMv4" width="320" height="240" controls></video>
+
+[![How to Use](https://img.youtube.com/vi/lSfKQv8IMv4/0.jpg)](https://www.youtube.com/watch?v=lSfKQv8IMv4)
 
 ## 第一次開啟
 
 由於本工具並未簽名，第一次開啟時，macOS 與 Windows 會顯示各自的安全性警告，請依照對應系統的提示完成處理。
 
 - macOS
+<img width="720" height="632" alt="mac-security" src="https://github.com/user-attachments/assets/7306a982-159e-4c44-b2af-3d422ed010d3" />
+
 - Windows
+<img width="872" height="812" alt="Large GIF (872x812)" src="https://github.com/user-attachments/assets/19bb8899-e5ba-42f8-aef4-ba1a2b9972d1" />
 
 ## 免責聲明
 
