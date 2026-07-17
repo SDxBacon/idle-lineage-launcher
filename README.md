@@ -39,10 +39,10 @@
 由於本工具並未簽名，第一次開啟時，macOS 與 Windows 會顯示各自的安全性警告，請依照對應系統的提示完成處理。
 
 - macOS
-<img width="720" height="632" alt="mac-security" src="https://github.com/user-attachments/assets/7306a982-159e-4c44-b2af-3d422ed010d3" />
+<img width="360" height="316" alt="mac-security" src="https://github.com/user-attachments/assets/7306a982-159e-4c44-b2af-3d422ed010d3" />
 
 - Windows
-<img width="872" height="812" alt="Large GIF (872x812)" src="https://github.com/user-attachments/assets/19bb8899-e5ba-42f8-aef4-ba1a2b9972d1" />
+<img width="436" height="406" alt="Large GIF (872x812)" src="https://github.com/user-attachments/assets/19bb8899-e5ba-42f8-aef4-ba1a2b9972d1" />
 
 ## 免責聲明
 
