@@ -200,7 +200,7 @@ function UpdateAction({
 function OperationProgress({ state }: { state: GameState }) {
   const percentage = state.progressPercent >= 0 ? Math.min(100, state.progressPercent) : null;
   const phase = state.progressPhase || defaultProgressPhase(state.status);
-  const detail = state.progressText || state.message || '等待 Git server 回應…';
+  const detail = state.progressText || state.message || '等待更新伺服器回應…';
 
   return (
     <div className="progress-block" aria-live="polite">
@@ -287,11 +287,11 @@ function statusDescription(status: GameStatus) {
     case GameStatus.StatusResolving:
       return '正在確認官方版本與下載位置。';
     case GameStatus.StatusInstalling:
-      return '正在從官方 GitHub main 分支下載遊戲。';
+      return '正在從官方伺服器下載遊戲。';
     case GameStatus.StatusReady:
       return '可以啟動遊戲，或手動檢查是否有新版本。';
     case GameStatus.StatusChecking:
-      return '正在向官方 repository 查詢新版本；目前版本仍可啟動。';
+      return '正在查詢官方新版本；目前版本仍可啟動。';
     case GameStatus.StatusUpdateAvailable:
       return '新版本已可下載；更新前仍可啟動目前版本。';
     case GameStatus.StatusUpdating:
@@ -308,13 +308,13 @@ function statusDescription(status: GameStatus) {
 function defaultProgressPhase(status: GameStatus) {
   switch (status) {
     case GameStatus.StatusChecking:
-      return 'Fetch repository';
+      return '檢查官方版本';
     case GameStatus.StatusUpdating:
-      return 'Pull repository';
+      return '同步官方版本';
     case GameStatus.StatusResolving:
-      return 'Resolve repository';
+      return '確認官方版本';
     default:
-      return 'Clone repository';
+      return '下載官方版本';
   }
 }
 

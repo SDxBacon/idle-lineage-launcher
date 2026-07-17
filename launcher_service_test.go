@@ -101,6 +101,36 @@ func TestLaunchGameRejectsReadyStateWithoutActiveInstall(t *testing.T) {
 	}
 }
 
+func TestLaunchGameReconcilesDeletedActiveInstall(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	manager := launchableManager(root, StatusReady)
+	called := false
+	service := &LauncherService{
+		manager: manager,
+		openFile: func(string) error {
+			called = true
+			return nil
+		},
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.LaunchGame(); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("file opener was called for a deleted installation")
+	}
+	if state := manager.State(); state.Status != StatusMissing || state.Error != "" {
+		t.Fatalf("deleted installation was not reconciled: %+v", state)
+	}
+	if root, commit, installed := manager.ActiveVersion(); installed || root != "" || commit != "" {
+		t.Fatalf("deleted installation remained active: root=%q commit=%q installed=%v", root, commit, installed)
+	}
+}
+
 func TestLaunchGameRevalidatesEntry(t *testing.T) {
 	root := t.TempDir()
 	service := &LauncherService{
@@ -222,6 +252,32 @@ func TestOpenGameFolderRejectsMissingActiveInstall(t *testing.T) {
 	}
 	if err := service.OpenGameFolder(); err == nil {
 		t.Fatal("expected missing install to be rejected")
+	}
+}
+
+func TestOpenGameFolderReconcilesDeletedActiveInstall(t *testing.T) {
+	root := t.TempDir()
+	manager := launchableManager(root, StatusReady)
+	called := false
+	service := &LauncherService{
+		manager: manager,
+		openFolder: func(string, bool) error {
+			called = true
+			return nil
+		},
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.OpenGameFolder(); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("folder opener was called for a deleted installation")
+	}
+	if state := manager.State(); state.Status != StatusMissing || state.Error != "" {
+		t.Fatalf("deleted installation was not reconciled: %+v", state)
 	}
 }
 

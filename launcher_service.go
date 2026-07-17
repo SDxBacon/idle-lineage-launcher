@@ -48,6 +48,11 @@ func (service *LauncherService) LaunchGame() error {
 	if service == nil || service.manager == nil {
 		return errors.New("game manager is unavailable")
 	}
+	if missing, err := service.manager.reconcileMissingActiveGame(); err != nil {
+		return err
+	} else if missing {
+		return nil
+	}
 	return service.manager.withLaunchableRoot(func(root string) error {
 		entry, err := validatedGameEntry(root)
 		if err != nil {
@@ -68,6 +73,11 @@ func (service *LauncherService) OpenGameFolder() error {
 	slog.Info("backend service call", "method", "OpenGameFolder")
 	if service == nil || service.manager == nil {
 		return errors.New("game manager is unavailable")
+	}
+	if missing, err := service.manager.reconcileMissingActiveGame(); err != nil {
+		return err
+	} else if missing {
+		return nil
 	}
 	root, _, installed := service.manager.ActiveVersion()
 	if !installed {

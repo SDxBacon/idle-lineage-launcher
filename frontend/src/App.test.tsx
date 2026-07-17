@@ -127,11 +127,11 @@ describe('App', () => {
     expect(mocks.startInstall).toHaveBeenCalledTimes(1);
   });
 
-  it('renders install progress and lets the user cancel the clone', async () => {
+  it('renders install progress and lets the user cancel the download', async () => {
     mocks.getGameState.mockResolvedValue(state({
       status: 'installing',
-      progressPhase: '接收 Git objects',
-      progressText: 'Receiving objects: 50% (50/100)',
+      progressPhase: '接收遊戲檔案',
+      progressText: '接收遊戲檔案：50%',
       progressPercent: 50,
       progressSeconds: 8,
       message: '正在下載',
@@ -140,7 +140,7 @@ describe('App', () => {
 
     expect(await screen.findByRole('heading', { name: '正在下載遊戲' })).toBeInTheDocument();
     expect(screen.getByText('50%')).toBeInTheDocument();
-    expect(screen.getByText('Receiving objects: 50% (50/100)')).toBeInTheDocument();
+    expect(screen.getByText('接收遊戲檔案：50%')).toBeInTheDocument();
     expect(screen.getByText('已執行 8 秒')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '取消下載' }));
@@ -148,16 +148,16 @@ describe('App', () => {
     expect(mocks.cancelInstall).toHaveBeenCalledTimes(1);
   });
 
-  it('renders repository resolution as cancellable download progress', async () => {
+  it('renders version resolution as cancellable download progress', async () => {
     mocks.getGameState.mockResolvedValue(state({
       status: 'resolving',
       progressPercent: -1,
-      message: '正在確認官方 repository',
+      message: '正在確認官方版本',
     }));
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: '正在下載遊戲' })).toBeInTheDocument();
-    expect(screen.getByRole('progressbar', { name: 'Resolve repository' })).not.toHaveAttribute('aria-valuenow');
+    expect(screen.getByRole('progressbar', { name: '確認官方版本' })).not.toHaveAttribute('aria-valuenow');
     expect(screen.getByRole('button', { name: '取消下載' })).toBeEnabled();
   });
 
@@ -209,6 +209,7 @@ describe('App', () => {
 
     expect(mocks.launchGame).toHaveBeenCalledTimes(1);
     expect(mocks.checkForUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.startUpdate).not.toHaveBeenCalled();
     expect(mocks.openGameFolder).toHaveBeenCalledTimes(1);
   });
 
@@ -227,13 +228,13 @@ describe('App', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('fetch origin/main failed');
   });
 
-  it('keeps launch enabled while fetch is checking for updates', async () => {
+  it('keeps launch enabled while checking for updates', async () => {
     mocks.getGameState.mockResolvedValue(state({
       status: 'checking',
       commit: 'local-commit',
-      message: '正在 fetch',
-      progressPhase: '計算 Git objects',
-      progressText: 'Counting objects: 30% (3/10)',
+      message: '正在檢查官方版本',
+      progressPhase: '計算遊戲檔案',
+      progressText: '計算遊戲檔案：30%',
       progressPercent: 30,
       progressSeconds: 2,
     }));
@@ -242,7 +243,7 @@ describe('App', () => {
     const launchButton = await screen.findByRole('button', { name: '啟動遊戲' });
     expect(launchButton).toBeEnabled();
     expect(screen.getByRole('button', { name: '正在檢查更新' })).toBeDisabled();
-    expect(screen.getByText('Counting objects: 30% (3/10)')).toBeInTheDocument();
+    expect(screen.getByText('計算遊戲檔案：30%')).toBeInTheDocument();
     expect(screen.queryByLabelText('遊戲版本')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '遊戲資料夾' })).toBeEnabled();
 
@@ -251,7 +252,7 @@ describe('App', () => {
     expect(mocks.launchGame).toHaveBeenCalledTimes(1);
   });
 
-  it('offers both the current version and an explicit pull when an update is available', async () => {
+  it('offers both the current version and an explicit update when one is available', async () => {
     mocks.getGameState.mockResolvedValue(state({
       status: 'update_available',
       commit: '11111111aaaa',
@@ -272,13 +273,13 @@ describe('App', () => {
     expect(mocks.startUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it('disables launch and update controls while pull is in progress', async () => {
+  it('disables launch and update controls while synchronization is in progress', async () => {
     mocks.getGameState.mockResolvedValue(state({
       status: 'updating',
       commit: 'local-commit',
       remoteCommit: 'remote-commit',
-      progressPhase: 'Pull repository',
-      progressText: 'Fast-forwarding files',
+      progressPhase: '同步官方版本',
+      progressText: '正在套用官方檔案',
       progressPercent: 70,
       progressSeconds: 65,
       message: '正在更新',
@@ -290,7 +291,7 @@ describe('App', () => {
     expect(launchButton).toBeDisabled();
     expect(updateButton).toBeDisabled();
     expect(screen.getByRole('button', { name: '遊戲資料夾' })).toBeEnabled();
-    expect(screen.getByText('Fast-forwarding files')).toBeInTheDocument();
+    expect(screen.getByText('正在套用官方檔案')).toBeInTheDocument();
     expect(screen.getByText('已執行 1 分 5 秒')).toBeInTheDocument();
 
     fireEvent.click(launchButton);
@@ -336,6 +337,34 @@ describe('App', () => {
     expect(mocks.unsubscribe).toHaveBeenCalledWith('launcher:game-state');
     expect(mocks.listeners.get('launcher:game-state')?.size).toBe(0);
     expect(mocks.listeners.has('launcher:reload-game')).toBe(false);
+  });
+
+  it('returns to the install UI when the backend reports a deleted installation', async () => {
+    mocks.getGameState.mockResolvedValue(state({
+      revision: 1,
+      status: 'ready',
+      commit: 'local-commit',
+      remoteCommit: 'local-commit',
+      error: 'stale repository error',
+    }));
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('stale repository error');
+
+    emit('launcher:game-state', state({
+      revision: 2,
+      status: 'missing',
+      commit: '',
+      remoteCommit: '',
+      message: '尚未下載遊戲',
+      error: '',
+    }));
+
+    expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '下載遊戲' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: '啟動遊戲' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('does not let a late initial snapshot overwrite a newer state event', async () => {

@@ -12,14 +12,27 @@ other network operation. Downloading begins only after the user clicks the
 download button; the Go backend then uses `go-git` to shallow-clone the official
 `main` branch.
 
-When an installation already exists, startup schedules a background fetch.
-Manual update checks also fetch `origin/main` without modifying the working
-tree, and the UI reports an update only when the local revision is behind.
-Updates run only when requested by the user and use a fast-forward pull. Git
-`HEAD` is the installed-version source of truth, so no separate active-version
-manifest is written. Clone, fetch, and pull publish their Git sideband progress
-plus a one-second heartbeat to the UI. Backend lifecycle and Git stages are
-emitted as structured logs to the launcher process output.
+When an installation already exists, startup schedules a background update
+check. Manual and startup checks force-fetch the configured official `main`
+reference without modifying game files, then compare only the local and remote
+HEAD hashes. Local commits, rewritten remote history, shallow history, detached
+HEAD, and working-tree changes do not block this comparison.
+
+Updates run only when requested by the user. The launcher fetches `main` again,
+hard-resets the managed branch and working tree to that exact commit, and
+removes every tracked, untracked, and ignored path that is not part of the
+official tree. The game directory is therefore a launcher-managed cache, not a
+place for user files. If its Git metadata is unusable, startup reports an error
+and offers the existing retry-download flow; it never turns a check into an
+update. Only after the user explicitly requests an update may synchronization
+fall back to downloading the latest official version into staging and swapping
+it in after validation. Network failures occur before local files are changed;
+other storage or permission failures are reported with a retryable message.
+
+Git `HEAD` remains the installed-version source of truth, so no separate
+active-version manifest is written. Transfers publish localized progress plus
+a one-second heartbeat to the UI, while detailed Git lifecycle and sideband
+information is retained in structured launcher logs.
 
 The launch button validates `game/shines871/index.html` and passes that file to
 the operating system through Wails `app.Browser.OpenFile`. This does not force
@@ -77,8 +90,9 @@ are written to `release/0.1.0/` and no game content is included.
 
 The relevant subdirectories are:
 
-- `game/shines871/`: the active Git working tree; the entry point is
-  `game/shines871/index.html`.
+- `game/shines871/`: the launcher-managed active Git working tree; the entry
+  point is `game/shines871/index.html`. Updates delete non-official files from
+  this directory.
 - `game/staging/`: temporary clone data used while installing.
 - `webview/`: the launcher UI's Windows WebView2 profile. The externally opened
   game does not use this profile.

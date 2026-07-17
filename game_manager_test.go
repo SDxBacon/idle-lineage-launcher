@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -89,6 +90,158 @@ func TestInvalidShines871SourceStartsInRecoverableError(t *testing.T) {
 	}
 	if err := validateGameRoot(paths.Source); err != nil {
 		t.Fatalf("invalid source was unexpectedly deleted: %v", err)
+	}
+}
+
+func TestRepositoryCheckFailureDoesNotReplaceInstalledFiles(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	writeTestFile(t, manager.paths.Source, "js/app.js", "offline copy")
+	if err := os.Remove(filepath.Join(manager.paths.Source, ".git", "HEAD")); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, func() bool {
+		state := manager.State()
+		return state.Status == StatusReady && state.Error != ""
+	}, "failed repository check")
+	root, _, ready := manager.ActiveVersion()
+	if !ready || root != manager.paths.Source {
+		t.Fatalf("failed check deactivated the existing game: %q %v", root, ready)
+	}
+	contents, err := os.ReadFile(filepath.Join(manager.paths.Source, "js", "app.js"))
+	if err != nil || string(contents) != "offline copy" {
+		t.Fatalf("failed check changed the existing game: %q (%v)", contents, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if containsStatus(events, StatusUpdating) || containsStatus(events, StatusInstalling) {
+		t.Fatalf("repository check failure triggered a mutating state: %+v", events)
+	}
+}
+
+func TestDeletedGameDirectoryBecomesMissingAndCanBeReinstalled(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	if err := os.RemoveAll(manager.paths.Game); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	state := manager.State()
+	if state.Status != StatusMissing || state.Message != "尚未下載遊戲" || state.Error != "" {
+		t.Fatalf("deleted installation was not reconciled as missing: %+v", state)
+	}
+	if state.Commit != "" || state.CommitTime != "" || state.RemoteCommit != "" || state.RemoteCommitTime != "" || state.UpdateAvailable {
+		t.Fatalf("missing state retained stale version information: %+v", state)
+	}
+	if state.ProgressPhase != "" || state.ProgressText != "" || state.ProgressPercent != 0 || state.ProgressSeconds != 0 {
+		t.Fatalf("missing state retained stale progress information: %+v", state)
+	}
+	if root, commit, installed := manager.ActiveVersion(); installed || root != "" || commit != "" {
+		t.Fatalf("deleted installation remained active: root=%q commit=%q installed=%v", root, commit, installed)
+	}
+	mu.Lock()
+	if containsStatus(events, StatusChecking) {
+		mu.Unlock()
+		t.Fatalf("check job started after the installation disappeared: %+v", events)
+	}
+	mu.Unlock()
+
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	if err := validateGameRoot(manager.paths.Source); err != nil {
+		t.Fatalf("reinstall after deleting the game directory failed: %v", err)
+	}
+	assertDirectoryEmpty(t, manager.paths.Staging)
+}
+
+func TestUpdateReconcilesDeletedGameWithoutStartingRebuild(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	if err := os.RemoveAll(manager.paths.Game); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	if err := manager.StartUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	if state := manager.State(); state.Status != StatusMissing || state.Error != "" {
+		t.Fatalf("update did not reconcile the deleted installation: %+v", state)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if containsStatus(events, StatusUpdating) {
+		t.Fatalf("update or rebuild started after the installation disappeared: %+v", events)
+	}
+}
+
+func TestGitJobFailurePrioritizesDeletedInstallationOverOperationError(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager := testManager(t, remote.path, nil)
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	fallback := manager.State()
+	manager.mu.Lock()
+	manager.running = true
+	manager.state.Status = StatusChecking
+	manager.mu.Unlock()
+	if err := os.RemoveAll(manager.paths.Game); err != nil {
+		t.Fatal(err)
+	}
+
+	manager.finishJob("fetch", errors.New("open game repository: repository does not exist"), fallback, "檢查更新失敗；目前版本仍可使用", "已取消檢查更新")
+	state := manager.State()
+	if state.Status != StatusMissing || state.Error != "" || state.Message != "尚未下載遊戲" {
+		t.Fatalf("operation error won over missing-install reconciliation: %+v", state)
 	}
 }
 
@@ -222,6 +375,109 @@ func TestFetchDetectsBehindAndPullUpdatesOnlyWorkingTree(t *testing.T) {
 	}
 	if _, err := git.PlainOpen(manager.paths.Source); err != nil {
 		t.Fatalf("updated source is no longer a Git working tree: %v", err)
+	}
+}
+
+func TestHashOnlyCheckAndForceUpdateHandleDivergedDetachedHistory(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	base := remote.head(t)
+	remote.commitFile(t, "js/app.js", "remote-old", "old official change")
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := installed.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, manager.paths.Source, "local-only.txt", "local commit")
+	if _, err := worktree.Add("local-only.txt"); err != nil {
+		t.Fatal(err)
+	}
+	localHash, err := worktree.Commit("local divergent commit", &git.CommitOptions{Author: remote.signature()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installed.Storer.SetReference(plumbing.NewHashReference(plumbing.HEAD, localHash)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := remote.worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: plumbing.NewHash(base)}); err != nil {
+		t.Fatal(err)
+	}
+	want := remote.commitFile(t, "js/app.js", "remote-rewritten", "rewritten official history")
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusUpdateAvailable)
+	if manager.State().RemoteCommit != want {
+		t.Fatalf("hash-only check did not report rewritten remote: %+v", manager.State())
+	}
+	if head, err := installed.Head(); err != nil || head.Hash() != localHash || head.Type() != plumbing.HashReference {
+		t.Fatalf("check changed detached local HEAD: %v (%v)", head, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(manager.paths.Source, "local-only.txt")); err != nil || string(contents) != "local commit" {
+		t.Fatalf("check changed local working tree: %q (%v)", contents, err)
+	}
+	mu.Lock()
+	checkEvents := append([]GameState(nil), events...)
+	mu.Unlock()
+	if containsStatus(checkEvents, StatusUpdating) || containsStatus(checkEvents, StatusInstalling) {
+		t.Fatalf("hash-only check triggered a mutating state: %+v", checkEvents)
+	}
+
+	if err := manager.StartUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	if manager.State().Commit != want {
+		t.Fatalf("force update did not activate rewritten remote: %+v", manager.State())
+	}
+	if _, err := os.Lstat(filepath.Join(manager.paths.Source, "local-only.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("force update preserved local-only commit content: %v", err)
+	}
+	head, err := installed.Head()
+	if err != nil || head.Name() != gameBranchReference || head.Hash().String() != want {
+		t.Fatalf("force update did not normalize HEAD to main: %v (%v)", head, err)
+	}
+}
+
+func TestUpdateRefetchesLatestRemoteAfterCheck(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager := testManager(t, remote.path, nil)
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	remote.commitFile(t, "js/app.js", "first", "first update")
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusUpdateAvailable)
+	want := remote.commitFile(t, "js/app.js", "second", "second update")
+
+	if err := manager.StartUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	if manager.State().Commit != want {
+		t.Fatalf("update used stale revision from check: %+v", manager.State())
 	}
 }
 
@@ -434,8 +690,8 @@ func TestDevelopmentInstallFallbackFailuresDoNotActivateSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForStatus(t, manager, StatusError)
-		if !strings.Contains(manager.State().Error, fallbackError.Error()) {
-			t.Fatalf("install error = %q, want fallback error", manager.State().Error)
+		if manager.State().Error != userFacingOperationError("install") {
+			t.Fatalf("install error = %q, want user-facing install error", manager.State().Error)
 		}
 		assertExactThenFullMainFetches(t, fetches.snapshot(), manager.initialCommit)
 		assertNoInstalledSource(t, manager)
@@ -455,8 +711,8 @@ func TestDevelopmentInstallFallbackFailuresDoNotActivateSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		waitForStatus(t, manager, StatusError)
-		if !strings.Contains(manager.State().Error, "read development initial commit") {
-			t.Fatalf("install error = %q, want missing pinned commit error", manager.State().Error)
+		if manager.State().Error != userFacingOperationError("install") {
+			t.Fatalf("install error = %q, want user-facing install error", manager.State().Error)
 		}
 		assertExactThenFullMainFetches(t, fetches.snapshot(), manager.initialCommit)
 		assertNoInstalledSource(t, manager)
@@ -547,25 +803,24 @@ func TestFetchWhenCurrentRemainsReady(t *testing.T) {
 
 func TestFailedUpdateCheckPreservesLocalCommitTime(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
-	manager := testManager(t, remote.path, nil)
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
 	if err := manager.StartInstall(); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, StatusReady)
 	before := manager.State()
+	writeTestFile(t, manager.paths.Source, "js/app.js", "offline local copy")
 
-	installed, err := git.PlainOpen(manager.paths.Source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configuration, err := installed.Config()
-	if err != nil {
-		t.Fatal(err)
-	}
-	configuration.Remotes["origin"].URLs = []string{filepath.Join(t.TempDir(), "missing")}
-	if err := installed.Storer.SetConfig(configuration); err != nil {
-		t.Fatal(err)
-	}
+	manager.repositoryURL = filepath.Join(t.TempDir(), "missing")
+	mu.Lock()
+	events = nil
+	mu.Unlock()
 
 	if err := manager.StartCheckForUpdate(); err != nil {
 		t.Fatal(err)
@@ -578,9 +833,190 @@ func TestFailedUpdateCheckPreservesLocalCommitTime(t *testing.T) {
 	if after.Commit != before.Commit || after.CommitTime != before.CommitTime {
 		t.Fatalf("failed update check lost local version metadata: before=%+v after=%+v", before, after)
 	}
+	if contents, err := os.ReadFile(filepath.Join(manager.paths.Source, "js", "app.js")); err != nil || string(contents) != "offline local copy" {
+		t.Fatalf("failed network check changed local content: %q (%v)", contents, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if containsStatus(events, StatusUpdating) || containsStatus(events, StatusInstalling) {
+		t.Fatalf("failed network check triggered a mutating state: %+v", events)
+	}
 }
 
-func TestPullRefusesDirtyWorkingTree(t *testing.T) {
+func TestCheckIgnoresLocalRemoteMetadata(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager := testManager(t, remote.path, nil)
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	want := remote.commitFile(t, "js/app.js", "remote", "remote update")
+
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := installed.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	delete(configuration.Remotes, "origin")
+	configuration.Branches[gameBranch] = &config.Branch{Name: gameBranch, Remote: "wrong", Merge: plumbing.NewBranchReferenceName("wrong")}
+	if err := installed.Storer.SetConfig(configuration); err != nil {
+		t.Fatal(err)
+	}
+	_ = installed.Storer.RemoveReference(gameRemoteReference)
+
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusUpdateAvailable)
+	if manager.State().RemoteCommit != want {
+		t.Fatalf("check did not fetch the configured official revision: %+v", manager.State())
+	}
+	unchanged, err := installed.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := unchanged.Remotes["origin"]; exists {
+		t.Fatalf("check rewrote local origin metadata: %+v", unchanged.Remotes["origin"])
+	}
+	branch := unchanged.Branches[gameBranch]
+	if branch == nil || branch.Remote != "wrong" || branch.Merge != plumbing.NewBranchReferenceName("wrong") {
+		t.Fatalf("check rewrote local branch metadata: %+v", branch)
+	}
+}
+
+func TestHashOnlyCheckDoesNotChangeDirtyCurrentWorkingTree(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := installed.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, manager.paths.Source, "js/app.js", "local current-head edit")
+	writeTestFile(t, manager.paths.Source, "css/app.css", "staged local edit")
+	if _, err := worktree.Add("css/app.css"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(manager.paths.Source, "assets", "image.png")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, manager.paths.Source, ".DS_Store", "finder")
+	writeTestFile(t, manager.paths.Source, "mods/local.txt", "untracked")
+	writeTestFile(t, manager.paths.Source, ".gitignore", "ignored.cache\n")
+	writeTestFile(t, manager.paths.Source, "ignored.cache", "ignored")
+	statusBefore, err := worktree.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := statusBefore["ignored.cache"]; exists {
+		t.Fatalf("test fixture did not create an ignored file: %v", statusBefore)
+	}
+	headBefore, err := installed.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForCondition(t, func() bool {
+		state := manager.State()
+		return state.Status == StatusReady && state.RemoteCommit != ""
+	}, "dirty current-head check")
+	if manager.State().UpdateAvailable {
+		t.Fatalf("equal HEAD hashes were reported as an update: %+v", manager.State())
+	}
+	headAfter, err := installed.Head()
+	if err != nil || headAfter.Hash() != headBefore.Hash() || headAfter.Name() != headBefore.Name() {
+		t.Fatalf("check changed local HEAD: before=%v after=%v (%v)", headBefore, headAfter, err)
+	}
+	statusAfter, err := worktree.Status()
+	if err != nil || !reflect.DeepEqual(statusAfter, statusBefore) {
+		t.Fatalf("check changed working-tree status: before=%v after=%v (%v)", statusBefore, statusAfter, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(manager.paths.Source, "js", "app.js")); err != nil || string(contents) != "local current-head edit" {
+		t.Fatalf("check overwrote tracked local content: %q (%v)", contents, err)
+	}
+	for relative, want := range map[string]string{
+		"css/app.css":    "staged local edit",
+		".DS_Store":      "finder",
+		".gitignore":     "ignored.cache\n",
+		"mods/local.txt": "untracked",
+		"ignored.cache":  "ignored",
+	} {
+		contents, err := os.ReadFile(filepath.Join(manager.paths.Source, filepath.FromSlash(relative)))
+		if err != nil || string(contents) != want {
+			t.Fatalf("check changed local path %q: %q (%v)", relative, contents, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(manager.paths.Source, "assets", "image.png")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("check restored a locally deleted file: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if containsStatus(events, StatusUpdating) || containsStatus(events, StatusInstalling) {
+		t.Fatalf("hash-only check triggered a mutating state: %+v", events)
+	}
+}
+
+func TestStartupUpdateCheckUsesNonMutatingCheckPath(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	var mu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		mu.Lock()
+		events = append(events, state)
+		mu.Unlock()
+	})
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	want := remote.commitFile(t, "js/app.js", "official update", "startup update")
+	writeTestFile(t, manager.paths.Source, "js/app.js", "local startup edit")
+	writeTestFile(t, manager.paths.Source, ".DS_Store", "finder")
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	startStartupUpdateCheck(manager)
+	waitForStatus(t, manager, StatusUpdateAvailable)
+	if manager.State().RemoteCommit != want {
+		t.Fatalf("startup check did not report the remote hash: %+v", manager.State())
+	}
+	if contents, err := os.ReadFile(filepath.Join(manager.paths.Source, "js", "app.js")); err != nil || string(contents) != "local startup edit" {
+		t.Fatalf("startup check changed tracked content: %q (%v)", contents, err)
+	}
+	if contents, err := os.ReadFile(filepath.Join(manager.paths.Source, ".DS_Store")); err != nil || string(contents) != "finder" {
+		t.Fatalf("startup check changed untracked content: %q (%v)", contents, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if containsStatus(events, StatusUpdating) || containsStatus(events, StatusInstalling) {
+		t.Fatalf("startup check triggered a mutating state: %+v", events)
+	}
+}
+
+func TestForceUpdateOverwritesDirtyTreeAndRemovesAllNonOfficialFiles(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
 	manager := testManager(t, remote.path, nil)
 	if err := manager.StartInstall(); err != nil {
@@ -592,28 +1028,104 @@ func TestPullRefusesDirtyWorkingTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, StatusUpdateAvailable)
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := installed.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
 	localPath := filepath.Join(manager.paths.Source, "js", "app.js")
 	if err := os.WriteFile(localPath, []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktree.Add("js/app.js"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(manager.paths.Source, "css", "app.css")); err != nil {
+		t.Fatal(err)
+	}
+	for relative, contents := range map[string]string{
+		".DS_Store":                  "finder",
+		"public/.DS_Store":           "finder",
+		"ignored.cache":              "ignored",
+		"mods/local/.git/config":     "nested repository",
+		"untracked/nested/extra.txt": "extra",
+	} {
+		writeTestFile(t, manager.paths.Source, relative, contents)
+	}
+	writeTestFile(t, filepath.Join(manager.paths.Source, ".git", "info"), "exclude", "ignored.cache\n")
+
+	if err := manager.StartUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	contents, err := os.ReadFile(localPath)
+	if err != nil || string(contents) != "remote" {
+		t.Fatalf("tracked local change was not overwritten: %q (%v)", contents, err)
+	}
+	css, err := os.ReadFile(filepath.Join(manager.paths.Source, "css", "app.css"))
+	if err != nil || string(css) != "body{}" {
+		t.Fatalf("deleted tracked file was not restored: %q (%v)", css, err)
+	}
+	for _, relative := range []string{".DS_Store", "public", "ignored.cache", "mods", "untracked"} {
+		if _, err := os.Lstat(filepath.Join(manager.paths.Source, relative)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("non-official path %q remains after update: %v", relative, err)
+		}
+	}
+	status, err := worktree.Status()
+	if err != nil || !status.IsClean() {
+		t.Fatalf("updated working tree is not clean: %v (%v)", status, err)
+	}
+	head, err := installed.Head()
+	if err != nil || head.Hash().String() != remote.head(t) || head.Name() != gameBranchReference {
+		t.Fatalf("updated HEAD was not normalized to official main: %v (%v)", head, err)
+	}
+}
+
+func TestUpdateRebuildsLatestVersionWhenIndexIsCorrupt(t *testing.T) {
+	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
+	manager := testManager(t, remote.path, nil)
+	if err := manager.StartInstall(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusReady)
+	want := remote.commitFile(t, "js/app.js", "re-downloaded", "remote update")
+	if err := manager.StartCheckForUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, manager, StatusUpdateAvailable)
+	if err := os.WriteFile(filepath.Join(manager.paths.Source, ".git", "index"), []byte("corrupt index"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	if err := manager.StartUpdate(); err != nil {
 		t.Fatal(err)
 	}
-	waitForCondition(t, func() bool {
-		state := manager.State()
-		return state.Status == StatusUpdateAvailable && state.Error != ""
-	}, "dirty-worktree rejection")
-	contents, err := os.ReadFile(localPath)
-	if err != nil || string(contents) != "local" {
-		t.Fatalf("dirty file was overwritten: %q (%v)", contents, err)
+	waitForStatus(t, manager, StatusReady)
+	state := manager.State()
+	if state.Commit != want || state.Message != "更新完成；已重新下載官方最新版本" {
+		t.Fatalf("corrupt index was not rebuilt to latest remote: %+v", state)
+	}
+	installed, err := git.PlainOpen(manager.paths.Source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree, err := installed.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := worktree.Status()
+	if err != nil || !status.IsClean() {
+		t.Fatalf("rebuilt repository is not clean: %v (%v)", status, err)
 	}
 }
 
 func TestInstallReplacesInvalidShines871SourceOnRetry(t *testing.T) {
 	remote := newLocalGameRepository(t, filepath.Join(t.TempDir(), "remote"))
 	paths := makeDataPaths(t.TempDir())
-	writeValidGame(t, paths.Source)
+	writeTestFile(t, paths.Source, "broken.txt", "not a game")
 	manager, err := newGameManager(paths, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -688,7 +1200,7 @@ func TestGitProgressReporterPublishesSidebandAndHeartbeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := manager.State()
-	if state.ProgressPhase != "計算 Git objects" || state.ProgressPercent != 42 || state.ProgressText != "Counting objects: 42% (42/100)" {
+	if state.ProgressPhase != "計算遊戲檔案" || state.ProgressPercent != 42 || state.ProgressText != "計算遊戲檔案：42%" {
 		t.Fatalf("unexpected parsed progress: %+v", state)
 	}
 	waitForCondition(t, func() bool { return manager.State().ProgressSeconds >= 1 }, "Git progress heartbeat")
@@ -723,7 +1235,7 @@ func TestGitProgressReporterShowsPackfileReceiveAfterCompression(t *testing.T) {
 		t.Fatal(err)
 	}
 	state := manager.State()
-	if state.ProgressPhase != "壓縮 Git objects" || state.ProgressPercent != 100 {
+	if state.ProgressPhase != "壓縮遊戲檔案" || state.ProgressPercent != 100 {
 		t.Fatalf("unexpected compression progress: %+v", state)
 	}
 	if err := os.WriteFile(filepath.Join(packDir, "tmp_pack_receiving"), make([]byte, 5*1024*1024), 0o644); err != nil {
@@ -748,7 +1260,7 @@ func TestGitProgressReporterShowsPackfileReceiveAfterCompression(t *testing.T) {
 		t.Fatal(err)
 	}
 	state = manager.State()
-	if state.ProgressPhase != "接收 Git objects" || state.ProgressPercent != 12 || state.ProgressText != "Receiving objects: 12% (13118/109319)" {
+	if state.ProgressPhase != "接收遊戲檔案" || state.ProgressPercent != 12 || state.ProgressText != "接收遊戲檔案：12%" {
 		t.Fatalf("real receive progress did not replace synthetic phase: %+v", state)
 	}
 }
@@ -1028,6 +1540,17 @@ func writeValidGame(t *testing.T, root string) {
 		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("game"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeTestFile(t *testing.T, root, relative, contents string) {
+	t.Helper()
+	file := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

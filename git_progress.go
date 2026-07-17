@@ -14,8 +14,8 @@ import (
 var gitPercentPattern = regexp.MustCompile(`(?i)^([^:]+):\s*([0-9]{1,3})%`)
 
 const (
-	gitPackfileReceivePhase = "接收 Git objects"
-	gitPackfileReceiveText  = "正在下載並寫入 Git packfile"
+	gitPackfileReceivePhase = "接收遊戲檔案"
+	gitPackfileReceiveText  = "正在下載並寫入遊戲資料"
 )
 
 const gitPackfileReceiveDelay = 1500 * time.Millisecond
@@ -113,8 +113,9 @@ func (reporter *gitProgressReporter) handleLine(line string) {
 	if phase == "" {
 		phase = reporter.phase
 	}
+	progressText := localisedProgressText(phase, percent)
 	reporter.phase = phase
-	reporter.text = text
+	reporter.text = progressText
 	reporter.percent = percent
 	reporter.lastGitOutput = now
 	reporter.syntheticReceive = false
@@ -133,7 +134,7 @@ func (reporter *gitProgressReporter) handleLine(line string) {
 	if shouldLog {
 		reporter.manager.logger.Info("git progress", "operation", reporter.operation, "phase", phase, "percent", percent, "detail", text)
 	}
-	reporter.manager.updateGitProgress(phase, text, percent, elapsed, false)
+	reporter.manager.updateGitProgress(phase, progressText, percent, elapsed, false)
 }
 
 func (reporter *gitProgressReporter) heartbeat() {
@@ -153,7 +154,7 @@ func (reporter *gitProgressReporter) heartbeat() {
 			elapsed := int64(now.Sub(reporter.started).Seconds())
 			reporter.mu.Unlock()
 			if text == "" {
-				text = "等待 Git server 回應…"
+				text = "等待更新伺服器回應…"
 			}
 			reporter.manager.updateGitProgress(phase, text, percent, elapsed, true)
 		case <-reporter.stop:
@@ -165,7 +166,7 @@ func (reporter *gitProgressReporter) heartbeat() {
 func (reporter *gitProgressReporter) maybeShowSyntheticPackfileReceive(now time.Time) bool {
 	reporter.mu.Lock()
 	alreadySynthetic := reporter.syntheticReceive
-	shouldStartSynthetic := reporter.phase == "壓縮 Git objects" &&
+	shouldStartSynthetic := reporter.phase == "壓縮遊戲檔案" &&
 		reporter.percent == 100 &&
 		!reporter.lastGitOutput.IsZero() &&
 		now.Sub(reporter.lastGitOutput) >= gitPackfileReceiveDelay
@@ -267,18 +268,28 @@ func parseGitProgress(text string) (string, int) {
 func localiseGitPhase(phase string) string {
 	switch strings.ToLower(strings.TrimSpace(phase)) {
 	case "enumerating objects":
-		return "列舉 Git objects"
+		return "列舉遊戲檔案"
 	case "counting objects":
-		return "計算 Git objects"
+		return "計算遊戲檔案"
 	case "compressing objects":
-		return "壓縮 Git objects"
+		return "壓縮遊戲檔案"
 	case "receiving objects":
-		return "接收 Git objects"
+		return "接收遊戲檔案"
 	case "resolving deltas":
-		return "套用 Git deltas"
+		return "整理遊戲資料"
 	case "updating files":
 		return "更新檔案"
 	default:
-		return strings.TrimSpace(phase)
+		return "處理遊戲檔案"
 	}
+}
+
+func localisedProgressText(phase string, percent int) string {
+	if phase == "" {
+		phase = "處理遊戲檔案"
+	}
+	if percent >= 0 {
+		return fmt.Sprintf("%s：%d%%", phase, percent)
+	}
+	return phase + "…"
 }

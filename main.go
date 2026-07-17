@@ -70,14 +70,19 @@ func main() {
 	service.openFolder = app.Env.OpenFileManager
 	windows.app = app
 	windows.Create()
-	if _, _, installed := manager.ActiveVersion(); installed {
-		slog.Info("installed game detected; scheduling startup update check")
-		_ = manager.StartCheckForUpdate()
-	}
+	startStartupUpdateCheck(manager)
 
 	slog.Info("starting Wails application loop")
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
 	}
 	slog.Info("Wails application loop exited")
+}
+
+func startStartupUpdateCheck(manager *gameManager) {
+	if _, _, installed := manager.ActiveVersion(); !installed {
+		return
+	}
+	slog.Info("installed game detected; scheduling startup update check")
+	_ = manager.StartCheckForUpdate()
 }

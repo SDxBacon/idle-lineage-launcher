@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"sync"
 	"time"
@@ -14,6 +15,8 @@ import (
 	git "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 const (
@@ -23,9 +26,38 @@ const (
 )
 
 var (
-	gameBranchReference = plumbing.NewBranchReferenceName(gameBranch)
-	gameRemoteReference = plumbing.NewRemoteReferenceName("origin", gameBranch)
-	gameFetchRefSpec    = config.RefSpec("+refs/heads/" + gameBranch + ":refs/remotes/origin/" + gameBranch)
+	gameBranchReference  = plumbing.NewBranchReferenceName(gameBranch)
+	gameRemoteReference  = plumbing.NewRemoteReferenceName("origin", gameBranch)
+	gameFetchRefSpec     = config.RefSpec("+refs/heads/" + gameBranch + ":refs/remotes/origin/" + gameBranch)
+	errActiveGameMissing = errors.New("active game installation is missing")
+)
+
+type repositoryStateError struct {
+	err error
+}
+
+func (e *repositoryStateError) Error() string {
+	return e.err.Error()
+}
+
+func (e *repositoryStateError) Unwrap() error {
+	return e.err
+}
+
+func repositoryStateErrorf(format string, args ...any) error {
+	return &repositoryStateError{err: fmt.Errorf(format, args...)}
+}
+
+func isRepositoryStateError(err error) bool {
+	var target *repositoryStateError
+	return errors.As(err, &target)
+}
+
+type gameTreePathKind uint8
+
+const (
+	gameTreeFile gameTreePathKind = iota
+	gameTreeDirectory
 )
 
 type GameStatus string
@@ -170,9 +202,59 @@ func (m *gameManager) ActiveVersion() (root, commit string, ok bool) {
 	return m.activeRoot, m.state.Commit, true
 }
 
+func (m *gameManager) reconcileMissingActiveGame() (bool, error) {
+	m.mu.Lock()
+	if m.activeRoot == "" {
+		m.mu.Unlock()
+		return false, nil
+	}
+	if m.state.Status == StatusInstalling || m.state.Status == StatusUpdating {
+		m.mu.Unlock()
+		return false, nil
+	}
+	root := m.activeRoot
+	missing, err := gameRootMissing(root)
+	if err != nil {
+		m.mu.Unlock()
+		return false, fmt.Errorf("inspect active game directory: %w", err)
+	}
+	if !missing {
+		m.mu.Unlock()
+		return false, nil
+	}
+	cancel := m.cancel
+	state := m.transitionToMissingLocked()
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	m.logger.Warn("active game installation disappeared", "root", root)
+	m.publish(state)
+	return true, nil
+}
+
+func (m *gameManager) transitionToMissingLocked() GameState {
+	m.activeRoot = ""
+	m.state = GameState{Status: StatusMissing, Message: "尚未下載遊戲"}
+	m.advanceRevisionLocked()
+	return m.state
+}
+
+func gameRootMissing(root string) (bool, error) {
+	_, err := os.Lstat(root)
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
+}
+
 // withLaunchableRoot keeps update state transitions out of the launch critical
-// section. If a pull wins the lock first, the launch is rejected as updating;
-// if launch wins first, the pull cannot begin changing files until the system
+// section. If an update wins the lock first, launch is rejected as updating;
+// if launch wins first, the update cannot begin changing files until the system
 // opener has accepted or rejected the request.
 func (m *gameManager) withLaunchableRoot(open func(string) error) error {
 	m.mu.RLock()
@@ -200,11 +282,11 @@ func (m *gameManager) StartInstall() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.running = true
-	message := "正在 clone 官方 main 分支…"
+	message := "正在下載官方遊戲版本…"
 	if m.initialCommit != "" {
 		message = "正在下載 development 固定版本…"
 	}
-	m.state = GameState{Status: StatusInstalling, ProgressPhase: "準備", ProgressText: "正在連線 Git server…", ProgressPercent: -1, Message: message}
+	m.state = GameState{Status: StatusInstalling, ProgressPhase: "準備", ProgressText: "正在連線更新伺服器…", ProgressPercent: -1, Message: message}
 	m.advanceRevisionLocked()
 	state := m.state
 	m.wg.Add(1)
@@ -221,6 +303,11 @@ func (m *gameManager) StartInstall() error {
 
 func (m *gameManager) StartCheckForUpdate() error {
 	m.logger.Info("update check requested")
+	if missing, err := m.reconcileMissingActiveGame(); err != nil {
+		return err
+	} else if missing {
+		return nil
+	}
 	m.mu.Lock()
 	if m.activeRoot == "" {
 		m.mu.Unlock()
@@ -238,10 +325,10 @@ func (m *gameManager) StartCheckForUpdate() error {
 	m.cancel = cancel
 	m.running = true
 	m.state.Status = StatusChecking
-	m.state.Message = "正在 fetch 官方 main 分支…"
+	m.state.Message = "正在檢查官方最新版本…"
 	m.state.Error = ""
 	m.state.ProgressPhase = "準備"
-	m.state.ProgressText = "正在連線 Git server…"
+	m.state.ProgressText = "正在連線更新伺服器…"
 	m.state.ProgressPercent = -1
 	m.state.ProgressSeconds = 0
 	m.advanceRevisionLocked()
@@ -259,6 +346,11 @@ func (m *gameManager) StartCheckForUpdate() error {
 
 func (m *gameManager) StartUpdate() error {
 	m.logger.Info("update requested")
+	if missing, err := m.reconcileMissingActiveGame(); err != nil {
+		return err
+	} else if missing {
+		return nil
+	}
 	m.mu.Lock()
 	if m.activeRoot == "" {
 		m.mu.Unlock()
@@ -277,10 +369,10 @@ func (m *gameManager) StartUpdate() error {
 	m.cancel = cancel
 	m.running = true
 	m.state.Status = StatusUpdating
-	m.state.Message = "正在 pull 最新遊戲內容…"
+	m.state.Message = "正在同步官方最新遊戲內容…"
 	m.state.Error = ""
 	m.state.ProgressPhase = "準備"
-	m.state.ProgressText = "正在連線 Git server…"
+	m.state.ProgressText = "正在連線更新伺服器…"
 	m.state.ProgressPercent = -1
 	m.state.ProgressSeconds = 0
 	m.advanceRevisionLocked()
@@ -291,7 +383,7 @@ func (m *gameManager) StartUpdate() error {
 
 	go func() {
 		defer m.wg.Done()
-		m.finishJob("pull", m.update(ctx), fallback, "更新失敗；目前版本仍可使用", "已取消更新；目前版本仍可使用")
+		m.finishJob("sync", m.update(ctx), fallback, "更新失敗；目前版本仍可使用", "已取消更新；目前版本仍可使用")
 	}()
 	return nil
 }
@@ -316,7 +408,17 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 	m.mu.Lock()
 	m.running = false
 	m.cancel = nil
-	if err != nil {
+	reconciledMissing := m.state.Status == StatusMissing && m.activeRoot == ""
+	missingRoot := false
+	if m.activeRoot != "" {
+		missingRoot, _ = gameRootMissing(m.activeRoot)
+	}
+	if errors.Is(err, errActiveGameMissing) || missingRoot {
+		if !reconciledMissing {
+			m.transitionToMissingLocked()
+		}
+		reconciledMissing = true
+	} else if err != nil && !reconciledMissing {
 		if m.activeRoot != "" {
 			m.state = fallback
 			if errors.Is(err, context.Canceled) {
@@ -324,18 +426,20 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 				m.state.Error = ""
 			} else {
 				m.state.Message = failureMessage
-				m.state.Error = err.Error()
+				m.state.Error = userFacingOperationError(operation)
 			}
 		} else if errors.Is(err, context.Canceled) {
 			m.state = GameState{Status: StatusCancelled, Message: cancelledMessage}
 		} else {
-			m.state = GameState{Status: StatusError, Message: failureMessage, Error: err.Error()}
+			m.state = GameState{Status: StatusError, Message: failureMessage, Error: userFacingOperationError(operation)}
 		}
 		m.advanceRevisionLocked()
 	}
 	state := m.state
 	m.mu.Unlock()
-	if err == nil {
+	if reconciledMissing {
+		m.logger.Warn("Git job ended after active game installation disappeared", "operation", operation)
+	} else if err == nil {
 		m.logger.Info("Git job completed", "operation", operation, "status", state.Status, "commit", state.Commit)
 	} else if errors.Is(err, context.Canceled) {
 		m.logger.Warn("Git job cancelled", "operation", operation)
@@ -345,18 +449,73 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 	m.publish(state)
 }
 
+func userFacingOperationError(operation string) string {
+	switch operation {
+	case "install":
+		return "無法下載遊戲。請確認網路連線與可用磁碟空間後重試。"
+	case "fetch":
+		return "無法連線檢查更新。請確認網路連線後再試一次。"
+	case "sync":
+		return "無法完成更新。目前版本仍可使用，請稍後再試。"
+	default:
+		return "操作失敗，請稍後再試。"
+	}
+}
+
 func (m *gameManager) cloneAndActivate(ctx context.Context) error {
+	return m.cloneVersionAndActivate(ctx, false, "安裝完成，可離線啟動")
+}
+
+func (m *gameManager) replaceWithLatestAndActivate(ctx context.Context, cause error) error {
+	missing, err := gameRootMissing(m.paths.Source)
+	if err != nil {
+		return fmt.Errorf("inspect game source before rebuild: %w", err)
+	}
+	if missing {
+		return fmt.Errorf("%w: %v", errActiveGameMissing, cause)
+	}
+	m.logger.Warn("rebuilding managed game repository", "cause", cause)
+	m.beginVersionReplacement()
+	if err := m.cloneVersionAndActivate(ctx, true, "更新完成；已重新下載官方最新版本"); err != nil {
+		return fmt.Errorf("replace game version after %v: %w", cause, err)
+	}
+	return nil
+}
+
+func (m *gameManager) beginVersionReplacement() {
+	m.mu.Lock()
+	m.state.Status = StatusUpdating
+	m.state.Message = "正在重新下載官方最新版本…"
+	m.state.Error = ""
+	m.state.ProgressPhase = "重新下載"
+	m.state.ProgressText = "正在準備下載官方版本…"
+	m.state.ProgressPercent = -1
+	m.state.ProgressSeconds = 0
+	m.advanceRevisionLocked()
+	state := m.state
+	m.mu.Unlock()
+	m.publish(state)
+}
+
+func (m *gameManager) cloneVersionAndActivate(ctx context.Context, forceLatest bool, successMessage string) error {
+	if err := os.MkdirAll(m.paths.Staging, 0o755); err != nil {
+		return fmt.Errorf("prepare clone staging directory: %w", err)
+	}
 	staging, err := os.MkdirTemp(m.paths.Staging, "clone-")
 	if err != nil {
 		return fmt.Errorf("create clone directory: %w", err)
 	}
 	defer os.RemoveAll(staging)
-	progress := newGitProgressReporter(m, "clone", "正在連線並下載 Git objects…")
+	operation := "clone"
+	if forceLatest {
+		operation = "rebuild"
+	}
+	progress := newGitProgressReporter(m, operation, "正在連線並下載官方遊戲檔案…")
 	progress.WatchPackDir(filepath.Join(staging, ".git", "objects", "pack"))
 	defer progress.Close()
 
 	var repository *git.Repository
-	if m.initialCommit == "" {
+	if forceLatest || m.initialCommit == "" {
 		m.logger.Info("starting repository clone", "url", m.repositoryURL, "branch", gameBranch, "depth", 1)
 		repository, err = git.PlainCloneContext(ctx, staging, false, &git.CloneOptions{
 			URL:           m.repositoryURL,
@@ -389,11 +548,11 @@ func (m *gameManager) cloneAndActivate(ctx context.Context) error {
 		return fmt.Errorf("read cloned commit time: %w", err)
 	}
 	m.logger.Info("cloned revision validated", "commit", head.Hash().String())
-	progress.Stage("啟用版本", "正在切換遊戲 working tree…")
+	progress.Stage("啟用版本", "正在啟用遊戲版本…")
 	if err := m.replaceSource(staging); err != nil {
 		return err
 	}
-	return m.activate(head.Hash().String(), commitTime, "安裝完成，可離線啟動")
+	return m.activate(head.Hash().String(), commitTime, successMessage)
 }
 
 func (m *gameManager) fetchDevelopmentRepository(ctx context.Context, staging string, progress *gitProgressReporter) (*git.Repository, error) {
@@ -477,66 +636,62 @@ func (m *gameManager) fetchDevelopmentRepository(ctx context.Context, staging st
 }
 
 func (m *gameManager) checkForUpdate(ctx context.Context) error {
-	m.mu.RLock()
-	localCommit := m.state.Commit
-	m.mu.RUnlock()
-
 	repository, err := git.PlainOpen(m.paths.Source)
 	if err != nil {
 		return fmt.Errorf("open game repository: %w", err)
 	}
-	m.logger.Info("fetching origin/main", "local_commit", localCommit)
-	progress := newGitProgressReporter(m, "fetch", "正在向 origin/main 查詢更新…")
-	progress.WatchPackDir(filepath.Join(m.paths.Source, ".git", "objects", "pack"))
-	defer progress.Close()
-	err = repository.FetchContext(ctx, &git.FetchOptions{
-		RemoteName: "origin",
-		RefSpecs:   []config.RefSpec{gameFetchRefSpec},
-		Tags:       git.NoTags,
-		Progress:   progress,
-	})
-	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return fmt.Errorf("fetch game updates: %w", err)
-	}
-
 	head, err := repository.Head()
 	if err != nil {
 		return fmt.Errorf("read local game revision: %w", err)
 	}
-	remote, err := repository.Reference(gameRemoteReference, true)
+
+	m.logger.Info("fetching official main", "local_commit", head.Hash().String())
+	remote, remoteObject, err := m.fetchOfficialMain(ctx, repository, "fetch", "正在查詢官方最新版本…")
 	if err != nil {
-		return fmt.Errorf("read remote game revision: %w", err)
-	}
-	remoteObject, err := repository.CommitObject(remote.Hash())
-	if err != nil {
-		return fmt.Errorf("read remote commit: %w", err)
+		return err
 	}
 	remoteCommitTime := remoteObject.Committer.When.Format(time.RFC3339)
 	m.logger.Info("comparing Git revisions", "local", head.Hash().String(), "remote", remote.Hash().String())
-	progress.Stage("比較版本", "正在比較 local HEAD 與 origin/main…")
+	m.updateGitProgress("比較版本", "正在比較本機版本與官方版本…", -1, m.State().ProgressSeconds, true)
 	if head.Hash() == remote.Hash() {
 		m.logger.Info("game is already up to date", "commit", head.Hash().String())
 		m.setUpdateState(remote.Hash().String(), remoteCommitTime, false, "目前已是最新版本")
 		return nil
 	}
 
-	localObject, localErr := repository.CommitObject(head.Hash())
-	if localErr != nil {
-		return fmt.Errorf("read local commit: %w", localErr)
-	}
-	behind, ancestorErr := localObject.IsAncestor(remoteObject)
-	if ancestorErr == nil && !behind {
-		return errors.New("local main is not behind origin/main; refusing a non-fast-forward update")
-	}
-	if ancestorErr != nil {
-		shallow, shallowErr := repository.Storer.Shallow()
-		if shallowErr != nil || len(shallow) == 0 {
-			return fmt.Errorf("compare local and remote revisions: %w", ancestorErr)
-		}
-	}
 	m.setUpdateState(remote.Hash().String(), remoteCommitTime, true, "發現新的官方版本")
 	m.logger.Info("game update available", "local", head.Hash().String(), "remote", remote.Hash().String())
 	return nil
+}
+
+func (m *gameManager) fetchOfficialMain(ctx context.Context, repository *git.Repository, operation, initialText string) (*plumbing.Reference, *object.Commit, error) {
+	progress := newGitProgressReporter(m, operation, initialText)
+	progress.WatchPackDir(filepath.Join(m.paths.Source, ".git", "objects", "pack"))
+	defer progress.Close()
+	officialRemote := git.NewRemote(repository.Storer, &config.RemoteConfig{
+		Name:  "origin",
+		URLs:  []string{m.repositoryURL},
+		Fetch: []config.RefSpec{gameFetchRefSpec},
+	})
+	err := officialRemote.FetchContext(ctx, &git.FetchOptions{
+		RemoteName: "origin",
+		RefSpecs:   []config.RefSpec{gameFetchRefSpec},
+		Tags:       git.NoTags,
+		Force:      true,
+		Progress:   progress,
+	})
+	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
+		return nil, nil, fmt.Errorf("fetch official game version: %w", err)
+	}
+	remote, err := repository.Reference(gameRemoteReference, true)
+	if err != nil {
+		return nil, nil, repositoryStateErrorf("read fetched official revision: %w", err)
+	}
+	remoteObject, err := repository.CommitObject(remote.Hash())
+	if err != nil {
+		return nil, nil, repositoryStateErrorf("read fetched official commit: %w", err)
+	}
+	return remote, remoteObject, nil
 }
 
 func (m *gameManager) setUpdateState(remoteCommit, remoteCommitTime string, available bool, message string) {
@@ -558,50 +713,200 @@ func (m *gameManager) setUpdateState(remoteCommit, remoteCommitTime string, avai
 }
 
 func (m *gameManager) update(ctx context.Context) error {
-	m.logger.Info("opening game working tree for pull", "source", m.paths.Source)
+	m.logger.Info("opening managed game working tree for forced synchronization", "source", m.paths.Source)
 	repository, err := git.PlainOpen(m.paths.Source)
 	if err != nil {
-		return fmt.Errorf("open game repository: %w", err)
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("open game repository: %w", err))
+	}
+	remote, remoteObject, err := m.fetchOfficialMain(ctx, repository, "sync", "正在下載官方最新版本…")
+	if err != nil {
+		if isRepositoryStateError(err) {
+			return m.replaceWithLatestAndActivate(ctx, err)
+		}
+		return err
+	}
+	manifest, err := gameCommitManifest(remoteObject)
+	if err != nil {
+		return m.replaceWithLatestAndActivate(ctx, repositoryStateErrorf("read official game tree: %w", err))
 	}
 	worktree, err := repository.Worktree()
 	if err != nil {
-		return fmt.Errorf("open game working tree: %w", err)
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("open game working tree: %w", err))
 	}
-	status, err := worktree.Status()
-	if err != nil {
-		return fmt.Errorf("inspect game working tree: %w", err)
+	if _, err := repository.Storer.Index(); err != nil {
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("read game index: %w", err))
 	}
-	if !status.IsClean() {
-		m.logger.Warn("pull refused because working tree is dirty", "status", status.String())
-		return errors.New("game working tree has local changes; refusing to overwrite them")
+	if _, err := worktree.Status(); err != nil {
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("inspect game working tree: %w", err))
 	}
-	progress := newGitProgressReporter(m, "pull", "正在下載並套用更新…")
-	progress.WatchPackDir(filepath.Join(m.paths.Source, ".git", "objects", "pack"))
-	defer progress.Close()
-	m.logger.Info("pulling origin/main")
-	err = worktree.PullContext(ctx, &git.PullOptions{
-		RemoteName:    "origin",
-		ReferenceName: gameBranchReference,
-		SingleBranch:  true,
-		Progress:      progress,
-	})
-	if err != nil && !errors.Is(err, git.NoErrAlreadyUpToDate) {
-		return fmt.Errorf("pull game update: %w", err)
+	m.updateGitProgress("套用版本", "正在以官方版本取代本機檔案…", -1, m.State().ProgressSeconds, true)
+	if err := forceSynchronizeGameTree(repository, worktree, m.paths.Source, remote.Hash(), manifest); err != nil {
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("force synchronize game working tree: %w", err))
 	}
-	progress.Stage("驗證檔案", "正在驗證更新後的遊戲檔案…")
+	m.updateGitProgress("驗證檔案", "正在驗證更新後的遊戲檔案…", -1, m.State().ProgressSeconds, true)
 	if err := validateGameRoot(m.paths.Source); err != nil {
-		return fmt.Errorf("validate updated game: %w", err)
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("validate updated game: %w", err))
 	}
 	head, err := repository.Head()
 	if err != nil {
-		return fmt.Errorf("read updated revision: %w", err)
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("read synchronized revision: %w", err))
 	}
-	commitTime, err := repositoryCommitTime(repository, head.Hash())
-	if err != nil {
-		return fmt.Errorf("read updated commit time: %w", err)
+	if head.Hash() != remote.Hash() {
+		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("synchronized HEAD %s does not match official revision %s", head.Hash(), remote.Hash()))
 	}
-	m.logger.Info("pull completed", "commit", head.Hash().String())
+	commitTime := remoteObject.Committer.When.Format(time.RFC3339)
+	m.logger.Info("forced synchronization completed", "commit", head.Hash().String())
 	return m.activate(head.Hash().String(), commitTime, "更新完成；請重新整理或重新開啟瀏覽器頁面")
+}
+
+func gameCommitManifest(commit *object.Commit) (map[string]gameTreePathKind, error) {
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, err
+	}
+	manifest := make(map[string]gameTreePathKind)
+	var walk func(*object.Tree, string) error
+	walk = func(current *object.Tree, parent string) error {
+		for _, entry := range current.Entries {
+			name := path.Join(parent, entry.Name)
+			switch entry.Mode {
+			case filemode.Dir:
+				manifest[name] = gameTreeDirectory
+				subtree, err := current.Tree(entry.Name)
+				if err != nil {
+					return fmt.Errorf("read tree %q: %w", name, err)
+				}
+				if err := walk(subtree, name); err != nil {
+					return err
+				}
+			case filemode.Submodule:
+				return fmt.Errorf("unsupported game submodule %q", name)
+			default:
+				if !entry.Mode.IsFile() {
+					return fmt.Errorf("unsupported game file mode %s for %q", entry.Mode, name)
+				}
+				manifest[name] = gameTreeFile
+			}
+		}
+		return nil
+	}
+	if err := walk(tree, ""); err != nil {
+		return nil, err
+	}
+	if kind, exists := manifest["index.html"]; !exists || kind != gameTreeFile {
+		return nil, errors.New("official commit is missing index.html")
+	}
+	for _, name := range []string{"assets", "css", "js"} {
+		if manifest[name] != gameTreeDirectory {
+			return nil, fmt.Errorf("official commit is missing required directory %q", name)
+		}
+	}
+	return manifest, nil
+}
+
+func forceSynchronizeGameTree(repository *git.Repository, worktree *git.Worktree, root string, target plumbing.Hash, manifest map[string]gameTreePathKind) error {
+	if err := cleanGameTreeToManifest(root, manifest); err != nil {
+		return fmt.Errorf("remove non-official files: %w", err)
+	}
+	if err := repository.Storer.SetReference(plumbing.NewHashReference(gameBranchReference, target)); err != nil {
+		return fmt.Errorf("set local main revision: %w", err)
+	}
+	if err := repository.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, gameBranchReference)); err != nil {
+		return fmt.Errorf("attach HEAD to main: %w", err)
+	}
+	if err := worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: target}); err != nil {
+		return fmt.Errorf("hard reset to official revision: %w", err)
+	}
+	if err := cleanGameTreeToManifest(root, manifest); err != nil {
+		return fmt.Errorf("remove files created during synchronization: %w", err)
+	}
+	status, err := worktree.Status()
+	if err != nil {
+		return fmt.Errorf("inspect synchronized working tree: %w", err)
+	}
+	if !status.IsClean() {
+		return fmt.Errorf("synchronized working tree is not clean: %s", status.String())
+	}
+	if err := validateGameTreeManifest(root, manifest); err != nil {
+		return err
+	}
+	return nil
+}
+
+func cleanGameTreeToManifest(root string, manifest map[string]gameTreePathKind) error {
+	return walkManagedGameTree(root, "", func(relative, absolute string, info os.FileInfo) (bool, error) {
+		expected, exists := manifest[relative]
+		if !exists || !gameTreePathKindMatches(expected, info) {
+			if err := os.RemoveAll(absolute); err != nil {
+				return false, err
+			}
+			return false, nil
+		}
+		return expected == gameTreeDirectory, nil
+	})
+}
+
+func validateGameTreeManifest(root string, manifest map[string]gameTreePathKind) error {
+	seen := make(map[string]struct{}, len(manifest))
+	err := walkManagedGameTree(root, "", func(relative, _ string, info os.FileInfo) (bool, error) {
+		expected, exists := manifest[relative]
+		if !exists {
+			return false, fmt.Errorf("non-official path remains after synchronization: %q", relative)
+		}
+		if !gameTreePathKindMatches(expected, info) {
+			return false, fmt.Errorf("path type differs from official version: %q", relative)
+		}
+		seen[relative] = struct{}{}
+		return expected == gameTreeDirectory, nil
+	})
+	if err != nil {
+		return err
+	}
+	for relative := range manifest {
+		if _, exists := seen[relative]; !exists {
+			return fmt.Errorf("official path is missing after synchronization: %q", relative)
+		}
+	}
+	return nil
+}
+
+func walkManagedGameTree(root, relative string, visit func(string, string, os.FileInfo) (bool, error)) error {
+	directory := root
+	if relative != "" {
+		directory = filepath.Join(root, filepath.FromSlash(relative))
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		childRelative := path.Join(relative, entry.Name())
+		if childRelative == ".git" {
+			continue
+		}
+		absolute := filepath.Join(root, filepath.FromSlash(childRelative))
+		info, err := os.Lstat(absolute)
+		if err != nil {
+			return err
+		}
+		recurse, err := visit(childRelative, absolute, info)
+		if err != nil {
+			return err
+		}
+		if recurse {
+			if err := walkManagedGameTree(root, childRelative, visit); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func gameTreePathKindMatches(expected gameTreePathKind, info os.FileInfo) bool {
+	if expected == gameTreeDirectory {
+		return info.IsDir()
+	}
+	return info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0
 }
 
 func (m *gameManager) replaceSource(staging string) error {
@@ -629,7 +934,7 @@ func (m *gameManager) replaceSource(staging string) error {
 		return fmt.Errorf("install game source: %w", err)
 	}
 	if err := os.RemoveAll(backup); err != nil {
-		return fmt.Errorf("remove previous game source: %w", err)
+		m.logger.Warn("new game version is active but previous backup cleanup is deferred", "backup", backup, "error", err)
 	}
 	m.logger.Info("game source replacement completed", "destination", m.paths.Source)
 	return nil
