@@ -2,4 +2,4 @@
 
 package main
 
-const developmentInitialGameCommit = "7e30bc454196683129b8a883a2a1e6011f35bcc6"
+const developmentInitialGameCommit = "68249bcfd92e89fc14a6a9812bdf456aa430921b"
