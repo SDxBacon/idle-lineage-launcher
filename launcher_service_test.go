@@ -65,6 +65,33 @@ func TestRepositoryOpenersReturnSystemOpenerErrors(t *testing.T) {
 	}
 }
 
+func TestGetGameBrowsersDelegatesToGameLauncher(t *testing.T) {
+	service := &LauncherService{gameLauncher: testGameLauncher(&stubGameLauncherPlatform{
+		browsers: []GameBrowser{
+			{ID: "firefox", Name: "Firefox"},
+			{ID: "chrome", Name: "Chrome"},
+		},
+	})}
+
+	browsers, err := service.GetGameBrowsers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []GameBrowser{{ID: "chrome", Name: "Chrome"}, {ID: "firefox", Name: "Firefox"}}
+	if len(browsers) != len(want) || browsers[0] != want[0] || browsers[1] != want[1] {
+		t.Fatalf("unexpected game browsers: got %+v, want %+v", browsers, want)
+	}
+}
+
+func TestGetGameBrowsersRejectsMissingGameLauncher(t *testing.T) {
+	var nilService *LauncherService
+	for _, service := range []*LauncherService{nilService, &LauncherService{}} {
+		if _, err := service.GetGameBrowsers(); err == nil {
+			t.Fatal("expected missing game launcher to fail")
+		}
+	}
+}
+
 func TestLaunchGameOpensAbsoluteInstalledEntry(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "game with spaces")
 	writeGameEntry(t, root)
@@ -72,13 +99,13 @@ func TestLaunchGameOpensAbsoluteInstalledEntry(t *testing.T) {
 	var opened string
 	service := &LauncherService{
 		manager: manager,
-		openFile: func(path string) error {
+		gameLauncher: testGameLauncherWithDefault(func(path string) error {
 			opened = path
 			return nil
-		},
+		}),
 	}
 
-	if err := service.LaunchGame(); err != nil {
+	if err := launchGameError(service, nil); err != nil {
 		t.Fatal(err)
 	}
 	want, err := filepath.Abs(filepath.Join(root, "index.html"))
@@ -98,12 +125,12 @@ func TestLaunchGameAllowsInstalledNonUpdatingStates(t *testing.T) {
 			called := false
 			service := &LauncherService{
 				manager: launchableManager(root, status),
-				openFile: func(string) error {
+				gameLauncher: testGameLauncherWithDefault(func(string) error {
 					called = true
 					return nil
-				},
+				}),
 			}
-			if err := service.LaunchGame(); err != nil {
+			if err := launchGameError(service, nil); err != nil {
 				t.Fatal(err)
 			}
 			if !called {
@@ -129,12 +156,12 @@ func TestLaunchGameRejectsUnavailableStates(t *testing.T) {
 			called := false
 			service := &LauncherService{
 				manager: launchableManager(root, status),
-				openFile: func(string) error {
+				gameLauncher: testGameLauncherWithDefault(func(string) error {
 					called = true
 					return nil
-				},
+				}),
 			}
-			if err := service.LaunchGame(); err == nil {
+			if err := launchGameError(service, nil); err == nil {
 				t.Fatal("expected launch to be rejected")
 			}
 			if called {
@@ -147,12 +174,12 @@ func TestLaunchGameRejectsUnavailableStates(t *testing.T) {
 func TestLaunchGameRejectsReadyStateWithoutActiveInstall(t *testing.T) {
 	service := &LauncherService{
 		manager: &gameManager{state: GameState{Status: StatusReady}},
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			t.Fatal("file opener must not be called")
 			return nil
-		},
+		}),
 	}
-	if err := service.LaunchGame(); err == nil {
+	if err := launchGameError(service, nil); err == nil {
 		t.Fatal("expected missing active install to be rejected")
 	}
 }
@@ -164,16 +191,16 @@ func TestLaunchGameReconcilesDeletedActiveInstall(t *testing.T) {
 	called := false
 	service := &LauncherService{
 		manager: manager,
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			called = true
 			return nil
-		},
+		}),
 	}
 	if err := os.RemoveAll(root); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := service.LaunchGame(); err != nil {
+	if err := launchGameError(service, nil); err != nil {
 		t.Fatal(err)
 	}
 	if called {
@@ -191,19 +218,19 @@ func TestLaunchGameRevalidatesEntry(t *testing.T) {
 	root := t.TempDir()
 	service := &LauncherService{
 		manager: launchableManager(root, StatusReady),
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			t.Fatal("file opener must not be called")
 			return nil
-		},
+		}),
 	}
-	if err := service.LaunchGame(); err == nil {
+	if err := launchGameError(service, nil); err == nil {
 		t.Fatal("expected missing index.html to be rejected")
 	}
 
 	if err := os.Mkdir(filepath.Join(root, "index.html"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.LaunchGame(); err == nil {
+	if err := launchGameError(service, nil); err == nil {
 		t.Fatal("expected a non-regular index.html to be rejected")
 	}
 }
@@ -223,12 +250,12 @@ func TestLaunchGameRejectsEntrySymlinkOutsideRoot(t *testing.T) {
 	}
 	service := &LauncherService{
 		manager: launchableManager(root, StatusReady),
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			t.Fatal("file opener must not be called")
 			return nil
-		},
+		}),
 	}
-	if err := service.LaunchGame(); err == nil {
+	if err := launchGameError(service, nil); err == nil {
 		t.Fatal("expected escaping symlink to be rejected")
 	}
 }
@@ -245,12 +272,12 @@ func TestLaunchGameAllowsEntrySymlinkInsideRoot(t *testing.T) {
 	called := false
 	service := &LauncherService{
 		manager: launchableManager(root, StatusReady),
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			called = true
 			return nil
-		},
+		}),
 	}
-	if err := service.LaunchGame(); err != nil {
+	if err := launchGameError(service, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !called {
@@ -258,18 +285,53 @@ func TestLaunchGameAllowsEntrySymlinkInsideRoot(t *testing.T) {
 	}
 }
 
-func TestLaunchGameReturnsFileOpenerError(t *testing.T) {
+func TestLaunchGameReturnsDefaultBrowserLaunchError(t *testing.T) {
 	root := t.TempDir()
 	writeGameEntry(t, root)
 	want := errors.New("opener failed")
 	service := &LauncherService{
 		manager: launchableManager(root, StatusReady),
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			return want
-		},
+		}),
 	}
-	if err := service.LaunchGame(); !errors.Is(err, want) {
+	if err := launchGameError(service, nil); !errors.Is(err, want) {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLaunchGamePassesSelectedBrowserAndReturnsFallbackResult(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	platform := &stubGameLauncherPlatform{customErr: errors.New("browser was removed")}
+	service := &LauncherService{
+		manager:      launchableManager(root, StatusReady),
+		gameLauncher: testGameLauncher(platform),
+	}
+	browserID := "opaque-browser-id"
+
+	result, err := service.LaunchGame(&browserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.FallbackToDefault {
+		t.Fatal("expected LauncherService to propagate successful fallback")
+	}
+	if len(platform.customCalls) != 1 || platform.customCalls[0].browserID != browserID {
+		t.Fatalf("selected browser was not forwarded: %#v", platform.customCalls)
+	}
+	if len(platform.defaultEntries) != 1 {
+		t.Fatalf("expected one default fallback, got %#v", platform.defaultEntries)
+	}
+}
+
+func TestLaunchGameRejectsMissingGameLauncher(t *testing.T) {
+	root := t.TempDir()
+	writeGameEntry(t, root)
+	service := &LauncherService{manager: launchableManager(root, StatusReady)}
+
+	if err := launchGameError(service, nil); err == nil || err.Error() != "game launcher is unavailable" {
+		t.Fatalf("unexpected missing game launcher error: %v", err)
 	}
 }
 
@@ -358,16 +420,16 @@ func TestLaunchGameAndUpdateHaveDefinedOrdering(t *testing.T) {
 	releaseOpener := make(chan struct{})
 	service := &LauncherService{
 		manager: manager,
-		openFile: func(string) error {
+		gameLauncher: testGameLauncherWithDefault(func(string) error {
 			close(openerEntered)
 			<-releaseOpener
 			return nil
-		},
+		}),
 	}
 
 	launchDone := make(chan error, 1)
 	go func() {
-		launchDone <- service.LaunchGame()
+		launchDone <- launchGameError(service, nil)
 	}()
 	<-openerEntered
 
@@ -401,6 +463,11 @@ func launchableManager(root string, status GameStatus) *gameManager {
 		logger:     slog.Default(),
 		state:      GameState{Status: status, Commit: testCommitHash},
 	}
+}
+
+func launchGameError(service *LauncherService, browserID *string) error {
+	_, err := service.LaunchGame(browserID)
+	return err
 }
 
 func writeGameEntry(t *testing.T, root string) {

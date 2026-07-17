@@ -17,20 +17,28 @@ export function CheckForUpdate(): $CancellablePromise<void> {
     return $Call.ByID(4076042935);
 }
 
+export function GetGameBrowsers(): $CancellablePromise<$models.GameBrowser[]> {
+    return $Call.ByID(1785724032).then(($result: any) => {
+        return $$createType1($result);
+    });
+}
+
 export function GetGameState(): $CancellablePromise<$models.GameState> {
     return $Call.ByID(1448081722).then(($result: any) => {
-        return $$createType0($result);
+        return $$createType2($result);
     });
 }
 
 export function GetLauncherInfo(): $CancellablePromise<$models.LauncherInfo> {
     return $Call.ByID(2292426071).then(($result: any) => {
-        return $$createType1($result);
+        return $$createType3($result);
     });
 }
 
-export function LaunchGame(): $CancellablePromise<void> {
-    return $Call.ByID(2893946080);
+export function LaunchGame(browserID: string | null): $CancellablePromise<$models.GameLaunchResult> {
+    return $Call.ByID(2893946080, browserID).then(($result: any) => {
+        return $$createType4($result);
+    });
 }
 
 export function OpenGameFolder(): $CancellablePromise<void> {
@@ -54,5 +62,8 @@ export function StartUpdate(): $CancellablePromise<void> {
 }
 
 // Private type creation functions
-const $$createType0 = $models.GameState.createFrom;
-const $$createType1 = $models.LauncherInfo.createFrom;
+const $$createType0 = $models.GameBrowser.createFrom;
+const $$createType1 = $Create.Array($$createType0);
+const $$createType2 = $models.GameState.createFrom;
+const $$createType3 = $models.LauncherInfo.createFrom;
+const $$createType4 = $models.GameLaunchResult.createFrom;

@@ -7,6 +7,8 @@ export {
 };
 
 export {
+    GameBrowser,
+    GameLaunchResult,
     GameState,
     GameStatus,
     LauncherInfo

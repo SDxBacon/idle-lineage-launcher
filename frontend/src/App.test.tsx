@@ -1,11 +1,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { toast } from 'sonner';
 import App from './App';
+import { useGameLaunchConfigStore } from './stores/useGameLaunchConfigStore';
 
 const mocks = vi.hoisted(() => {
   const listeners = new Map<string, Set<(event: { data: unknown }) => void>>();
   return {
     listeners,
+    getGameBrowsers: vi.fn(),
     getGameState: vi.fn(),
     getLauncherInfo: vi.fn(),
     startInstall: vi.fn(),
@@ -51,6 +54,7 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
     StatusError: 'error',
   },
   LauncherService: {
+    GetGameBrowsers: mocks.getGameBrowsers,
     GetGameState: mocks.getGameState,
     GetLauncherInfo: mocks.getLauncherInfo,
     StartInstall: mocks.startInstall,
@@ -112,8 +116,12 @@ function releaseResponse(tagName: unknown, ok = true) {
 
 describe('App', () => {
   beforeEach(() => {
+    localStorage.clear();
+    useGameLaunchConfigStore.setState({ browserID: null });
+    toast.dismiss();
     mocks.listeners.clear();
     vi.clearAllMocks();
+    mocks.getGameBrowsers.mockResolvedValue([]);
     mocks.getLauncherInfo.mockResolvedValue({
       version: '0.1.0',
       gameRepository: 'shines871/idle-lineage-class',
@@ -122,7 +130,7 @@ describe('App', () => {
     mocks.checkForUpdate.mockResolvedValue(undefined);
     mocks.startUpdate.mockResolvedValue(undefined);
     mocks.cancelInstall.mockResolvedValue(undefined);
-    mocks.launchGame.mockResolvedValue(undefined);
+    mocks.launchGame.mockResolvedValue({ fallbackToDefault: false });
     mocks.openGameFolder.mockResolvedValue(undefined);
     mocks.openGameRepository.mockResolvedValue(undefined);
     mocks.openLauncherRepository.mockResolvedValue(undefined);
@@ -131,6 +139,7 @@ describe('App', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
     vi.unstubAllGlobals();
   });
@@ -152,8 +161,10 @@ describe('App', () => {
     expect(screen.getByText('SDxBacon').closest('footer')).toHaveClass('launcher-footer');
     expect(screen.getByText('約 500–800 MB')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '遊戲資料夾' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '開啟啟動器設置頁' })).not.toBeInTheDocument();
     expect(mocks.getGameState).toHaveBeenCalledTimes(1);
     expect(mocks.getLauncherInfo).toHaveBeenCalledTimes(1);
+    expect(mocks.getGameBrowsers).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(mocks.fetchLatestRelease).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId('launcher-update-indicator')).not.toBeInTheDocument();
     expect(mocks.startInstall).not.toHaveBeenCalled();
@@ -314,15 +325,89 @@ describe('App', () => {
     expect(screen.getByText('2026-06-07 08:09:10')).toHaveClass('version-time');
     expect(screen.getAllByText('·', { selector: '.version-separator' })).toHaveLength(2);
     expect(document.querySelector('iframe')).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '遊戲瀏覽器' })).not.toBeInTheDocument();
+    const folderButton = screen.getByRole('button', { name: '遊戲資料夾' });
+    const settingsButton = screen.getByRole('button', { name: '開啟啟動器設置頁' });
+    expect(settingsButton).toHaveAttribute('title', '開啟啟動器設置頁');
+    expect(folderButton.parentElement).toHaveClass('folder-settings-actions');
+    expect(folderButton.nextElementSibling).toBe(settingsButton);
 
     fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
     fireEvent.click(screen.getByRole('button', { name: '檢查更新' }));
-    fireEvent.click(screen.getByRole('button', { name: '遊戲資料夾' }));
+    fireEvent.click(folderButton);
 
     expect(mocks.launchGame).toHaveBeenCalledTimes(1);
+    expect(mocks.launchGame).toHaveBeenCalledWith(null);
+    expect(screen.queryByText('所選瀏覽器無法開啟遊戲')).not.toBeInTheDocument();
     expect(mocks.checkForUpdate).toHaveBeenCalledTimes(1);
     expect(mocks.startUpdate).not.toHaveBeenCalled();
     expect(mocks.openGameFolder).toHaveBeenCalledTimes(1);
+  });
+
+  it('opens the settings view with the shared chrome and returns to the latest dashboard', async () => {
+    mocks.getGameBrowsers.mockResolvedValue([
+      { id: 'browser:chrome', name: 'Google Chrome' },
+    ]);
+    mocks.getGameState.mockResolvedValue(state({
+      status: 'ready',
+      commit: 'local-commit',
+      message: '遊戲已就緒',
+    }));
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '遊戲瀏覽器' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '開啟啟動器設置頁' }));
+
+    expect(screen.getByRole('heading', { name: '啟動器設置頁' })).toBeInTheDocument();
+    expect(screen.getByText('IDLE LINEAGE LAUNCHER')).toBeInTheDocument();
+    expect(screen.getByText('遊戲來源')).toHaveClass('status-badge-label');
+    expect(screen.getByRole('button', {
+      name: '在 GitHub 開啟 shines871/idle-lineage-class',
+    })).toBeInTheDocument();
+    const browserSelect = await screen.findByRole('combobox', { name: '遊戲瀏覽器' });
+    expect(browserSelect).toHaveTextContent('系統預設');
+    fireEvent.click(browserSelect);
+    fireEvent.click(await screen.findByRole('option', { name: 'Google Chrome' }));
+    expect(useGameLaunchConfigStore.getState().browserID).toBe('browser:chrome');
+    expect(screen.getByRole('heading', { name: '遊戲資料夾', level: 2 })).toBeInTheDocument();
+    expect(screen.getByText('Lorem ipsum dolor sit amet, consectetur adipiscing elit.'))
+      .toBeInTheDocument();
+    expect(screen.getByText('v0.1.0')).toBeInTheDocument();
+
+    emit('launcher:game-state', state({
+      revision: 2,
+      status: 'update_available',
+      commit: 'local-commit',
+      remoteCommit: 'remote-commit',
+      updateAvailable: true,
+      message: '發現新的官方版本',
+    }));
+    expect(screen.getByRole('heading', { name: '啟動器設置頁' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '有可用更新' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '返回' }));
+
+    expect(screen.getByRole('heading', { name: '有可用更新' })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '遊戲瀏覽器' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '立即更新' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
+    expect(mocks.launchGame).toHaveBeenCalledWith('browser:chrome');
+  });
+
+  it('keeps repository action errors visible in settings', async () => {
+    mocks.openGameRepository.mockRejectedValueOnce(new Error('無法開啟遊戲來源'));
+    mocks.getGameState.mockResolvedValue(state({ status: 'ready', commit: 'local-commit' }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    fireEvent.click(screen.getByRole('button', {
+      name: '在 GitHub 開啟 shines871/idle-lineage-class',
+    }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('無法開啟遊戲來源');
+    expect(screen.getByRole('heading', { name: '啟動器設置頁' })).toBeInTheDocument();
   });
 
   it('does not claim the game is current before a successful fetch', async () => {
@@ -366,6 +451,7 @@ describe('App', () => {
     fireEvent.click(launchButton);
 
     expect(mocks.launchGame).toHaveBeenCalledTimes(1);
+    expect(mocks.launchGame).toHaveBeenCalledWith(null);
   });
 
   it('offers both the current version and an explicit update when one is available', async () => {
@@ -386,7 +472,81 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: '立即更新' }));
 
     expect(mocks.launchGame).toHaveBeenCalledTimes(1);
+    expect(mocks.launchGame).toHaveBeenCalledWith(null);
     expect(mocks.startUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets a failed custom browser and keeps a single fallback toast until dismissed', async () => {
+    useGameLaunchConfigStore.getState().setBrowserID('browser:chrome');
+    mocks.getGameBrowsers.mockResolvedValue([
+      { id: 'browser:chrome', name: 'Google Chrome' },
+    ]);
+    mocks.launchGame.mockResolvedValue({ fallbackToDefault: true });
+    mocks.getGameState.mockResolvedValue(state({
+      status: 'ready',
+      commit: 'local-commit',
+      message: '遊戲已就緒',
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    expect(await screen.findByRole('combobox', { name: '遊戲瀏覽器' })).toHaveTextContent(
+      'Google Chrome',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '返回' }));
+
+    fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
+
+    expect(await screen.findByText('所選瀏覽器無法開啟遊戲')).toBeInTheDocument();
+    expect(screen.getByText('已改用系統預設瀏覽器開啟，並重設瀏覽器選擇。')).toBeInTheDocument();
+    expect(mocks.launchGame).toHaveBeenCalledWith('browser:chrome');
+    expect(useGameLaunchConfigStore.getState().browserID).toBeNull();
+    expect(toast.getToasts()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'game-launch-browser-fallback',
+        duration: Infinity,
+        closeButton: true,
+      }),
+    ]));
+
+    fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
+    await waitFor(() => expect(mocks.launchGame).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByText('所選瀏覽器無法開啟遊戲')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: '關閉通知' }));
+    await waitFor(() => {
+      expect(screen.queryByText('所選瀏覽器無法開啟遊戲')).not.toBeInTheDocument();
+    });
+  });
+
+  it('does not auto-dismiss the fallback toast after the normal toast lifetime', async () => {
+    useGameLaunchConfigStore.getState().setBrowserID('browser:chrome');
+    mocks.getGameBrowsers.mockResolvedValue([
+      { id: 'browser:chrome', name: 'Google Chrome' },
+    ]);
+    mocks.launchGame.mockResolvedValue({ fallbackToDefault: true });
+    mocks.getGameState.mockResolvedValue(state({
+      status: 'ready',
+      commit: 'local-commit',
+      message: '遊戲已就緒',
+    }));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    await screen.findByRole('combobox', { name: '遊戲瀏覽器' });
+    fireEvent.click(screen.getByRole('button', { name: '返回' }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: '啟動遊戲' }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      vi.advanceTimersByTime(0);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('所選瀏覽器無法開啟遊戲')).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.getByText('所選瀏覽器無法開啟遊戲')).toBeInTheDocument();
   });
 
   it('disables launch and update controls while synchronization is in progress', async () => {
@@ -424,6 +584,7 @@ describe('App', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '啟動遊戲' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('預設瀏覽器拒絕開啟檔案');
+    expect(screen.queryByText('所選瀏覽器無法開啟遊戲')).not.toBeInTheDocument();
 
     emit('launcher:game-state', state({
       revision: 2,
@@ -480,6 +641,7 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '下載遊戲' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: '啟動遊戲' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '開啟啟動器設置頁' })).not.toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 

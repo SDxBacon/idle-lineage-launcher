@@ -40,7 +40,7 @@ func main() {
 	}
 
 	windows := &windowFactory{}
-	service := &LauncherService{manager: manager, version: version}
+	service := &LauncherService{manager: manager, version: version, gameLauncher: newGameLauncher()}
 	app = application.New(application.Options{
 		Name:        "Idle Lineage Launcher",
 		Description: "Desktop launcher for Idle Lineage Class",
@@ -69,7 +69,6 @@ func main() {
 			slog.Info("launcher shutdown callback completed")
 		},
 	})
-	service.openFile = app.Browser.OpenFile
 	service.openURL = app.Browser.OpenURL
 	service.openFolder = app.Env.OpenFileManager
 	windows.app = app

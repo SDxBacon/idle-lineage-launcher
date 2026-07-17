@@ -12,10 +12,18 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@radix-ui/react-select": "^2.3.3",
     "@wailsio/runtime": "3.0.0-alpha.97",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.25.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-tooltip": "^6.0.8"
+    "react-tooltip": "^6.0.8",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.6.0",
+    "tslib": "^2.8.1",
+    "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.2",

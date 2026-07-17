@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { Settings as SettingsIcon } from 'lucide-react';
 import { Tooltip } from 'react-tooltip';
+import { toast } from 'sonner';
 import { Events } from '@wailsio/runtime';
 import {
   GameState,
@@ -7,14 +9,42 @@ import {
   LauncherService,
   type LauncherInfo,
 } from '../bindings/github.com/SDxBacon/idle-lineage-launcher';
+import { GameLaunchSelect } from '@/components/GameLaunchSelect';
+import { Toaster } from '@/components/ui/sonner';
+import { useGameBrowsers, type GameBrowserOptions } from '@/hooks/useGameBrowsers';
 import { fetchNewerLauncherVersion } from './launcherRelease';
+import { useGameLaunchConfigStore } from '@/stores/useGameLaunchConfigStore';
 import './App.css';
 
 function App() {
+  return (
+    <>
+      <LauncherDashboard />
+      <Toaster
+        theme="dark"
+        richColors
+        closeButton
+        position="bottom-right"
+        containerAriaLabel="通知"
+        toastOptions={{
+          closeButtonAriaLabel: '關閉通知',
+        }}
+      />
+    </>
+  );
+}
+
+type LauncherView = 'dashboard' | 'settings';
+
+function LauncherDashboard() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [launcherInfo, setLauncherInfo] = useState<LauncherInfo | null>(null);
   const [latestLauncherVersion, setLatestLauncherVersion] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
+  const [view, setView] = useState<LauncherView>('dashboard');
+  const { browsers, loadState } = useGameBrowsers();
+  const browserID = useGameLaunchConfigStore(state => state.browserID);
+  const setBrowserID = useGameLaunchConfigStore(state => state.setBrowserID);
 
   useEffect(() => {
     let mounted = true;
@@ -66,6 +96,23 @@ function App() {
     void action().catch(error => setActionError(readError(error)));
   };
 
+  const launchGame = () => {
+    setActionError('');
+    void LauncherService.LaunchGame(browserID)
+      .then(result => {
+        if (!result.fallbackToDefault) return;
+
+        setBrowserID(null);
+        toast.warning('所選瀏覽器無法開啟遊戲', {
+          id: 'game-launch-browser-fallback',
+          description: '已改用系統預設瀏覽器開啟，並重設瀏覽器選擇。',
+          duration: Infinity,
+          closeButton: true,
+        });
+      })
+      .catch(error => setActionError(readError(error)));
+  };
+
   if (!gameState) {
     return (
       <StatusShell
@@ -92,6 +139,7 @@ function App() {
   const showProgress = installing
     || status === GameStatus.StatusChecking
     || status === GameStatus.StatusUpdating;
+  const openGameRepository = () => runAction(() => LauncherService.OpenGameRepository());
 
   return (
     <StatusShell
@@ -99,88 +147,154 @@ function App() {
       latestLauncherVersion={latestLauncherVersion}
       onOpenLauncherRepository={() => runAction(() => LauncherService.OpenLauncherRepository())}
     >
-      <header className="launcher-header">
-        <div className="brand-mark" aria-hidden="true">IL</div>
-        <div>
-          <p className="eyebrow">IDLE LINEAGE LAUNCHER</p>
-          <h1>{statusTitle(status)}</h1>
-        </div>
-        <div className="status-badge-field">
-          <span className="status-badge-label">遊戲來源</span>
-          <button
-            className="status-badge"
-            type="button"
-            disabled={!launcherInfo?.gameRepository}
-            aria-label={launcherInfo?.gameRepository
-              ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
-              : '正在讀取遊戲 repository'}
-            onClick={() => runAction(() => LauncherService.OpenGameRepository())}
-          >
-            {launcherInfo?.gameRepository || '—'}
-          </button>
-        </div>
-      </header>
+      <LauncherHeader
+        title={view === 'settings' ? '啟動器設置頁' : statusTitle(status)}
+        launcherInfo={launcherInfo}
+        onOpenGameRepository={openGameRepository}
+      />
 
-      <p className="lead">{gameState.message || statusDescription(status)}</p>
+      {view === 'settings' ? (
+        <SettingsView
+          browsers={browsers}
+          loadState={loadState}
+          actionError={actionError}
+          onBack={() => setView('dashboard')}
+        />
+      ) : (
+        <>
+          <p className="lead">{gameState.message || statusDescription(status)}</p>
 
-      {installed ? (
-        status !== GameStatus.StatusChecking ? <VersionSummary state={gameState} /> : null
-      ) : !installing ? (
-        <div className="requirements" aria-label="下載需求">
-          <div><strong>約 500–800 MB</strong><span>網路下載</span></div>
-          <div><strong>至少 1 GB</strong><span>可用磁碟空間</span></div>
-        </div>
-      ) : null}
+          {installed ? (
+            status !== GameStatus.StatusChecking ? <VersionSummary state={gameState} /> : null
+          ) : !installing ? (
+            <div className="requirements" aria-label="下載需求">
+              <div><strong>約 500–800 MB</strong><span>網路下載</span></div>
+              <div><strong>至少 1 GB</strong><span>可用磁碟空間</span></div>
+            </div>
+          ) : null}
 
-      {showProgress && <OperationProgress state={gameState} />}
+          {showProgress && <OperationProgress state={gameState} />}
 
-      {gameState.error && <InlineError message={gameState.error} />}
-      {actionError && actionError !== gameState.error && <InlineError message={actionError} />}
+          {gameState.error && <InlineError message={gameState.error} />}
+          {actionError && actionError !== gameState.error && <InlineError message={actionError} />}
 
-      <div className="actions">
-        {canInstall && (
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => runAction(() => LauncherService.StartInstall())}
-          >
-            {status === GameStatus.StatusMissing ? '下載遊戲' : '重試下載'}
-          </button>
-        )}
+          <div className="actions">
+            {canInstall && (
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => runAction(() => LauncherService.StartInstall())}
+              >
+                {status === GameStatus.StatusMissing ? '下載遊戲' : '重試下載'}
+              </button>
+            )}
 
-        {installing && (
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={() => runAction(() => LauncherService.CancelInstall())}
-          >
-            取消下載
-          </button>
-        )}
+            {installing && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => runAction(() => LauncherService.CancelInstall())}
+              >
+                取消下載
+              </button>
+            )}
 
-        {installed && (
-          <>
-            <button
-              className="primary-button"
-              type="button"
-              disabled={!canLaunch}
-              onClick={() => runAction(() => LauncherService.LaunchGame())}
-            >
-              啟動遊戲
-            </button>
-            <UpdateAction state={gameState} runAction={runAction} />
-            <button
-              className="secondary-button folder-button"
-              type="button"
-              onClick={() => runAction(() => LauncherService.OpenGameFolder())}
-            >
-              遊戲資料夾
-            </button>
-          </>
-        )}
-      </div>
+            {installed && (
+              <>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={!canLaunch}
+                  onClick={launchGame}
+                >
+                  啟動遊戲
+                </button>
+                <UpdateAction state={gameState} runAction={runAction} />
+                <div className="folder-settings-actions">
+                  <button
+                    className="secondary-button folder-button"
+                    type="button"
+                    onClick={() => runAction(() => LauncherService.OpenGameFolder())}
+                  >
+                    遊戲資料夾
+                  </button>
+                  <button
+                    className="secondary-button settings-button"
+                    type="button"
+                    aria-label="開啟啟動器設置頁"
+                    title="開啟啟動器設置頁"
+                    onClick={() => setView('settings')}
+                  >
+                    <SettingsIcon aria-hidden="true" />
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      )}
 
     </StatusShell>
+  );
+}
+
+function LauncherHeader({
+  title,
+  launcherInfo,
+  onOpenGameRepository,
+}: {
+  title: string;
+  launcherInfo: LauncherInfo | null;
+  onOpenGameRepository: () => void;
+}) {
+  return (
+    <header className="launcher-header">
+      <div className="brand-mark" aria-hidden="true">IL</div>
+      <div>
+        <p className="eyebrow">IDLE LINEAGE LAUNCHER</p>
+        <h1>{title}</h1>
+      </div>
+      <div className="status-badge-field">
+        <span className="status-badge-label">遊戲來源</span>
+        <button
+          className="status-badge"
+          type="button"
+          disabled={!launcherInfo?.gameRepository}
+          aria-label={launcherInfo?.gameRepository
+            ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
+            : '正在讀取遊戲 repository'}
+          onClick={onOpenGameRepository}
+        >
+          {launcherInfo?.gameRepository || '—'}
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function SettingsView({
+  browsers,
+  loadState,
+  actionError,
+  onBack,
+}: GameBrowserOptions & {
+  actionError: string;
+  onBack: () => void;
+}) {
+  return (
+    <div className="settings-view">
+      <GameLaunchSelect browsers={browsers} loadState={loadState} />
+      <section className="settings-panel" aria-labelledby="game-folder-settings-title">
+        <h2 id="game-folder-settings-title">遊戲資料夾</h2>
+        <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+      </section>
+      {actionError && <InlineError message={actionError} />}
+      <div className="settings-actions">
+        <button className="secondary-button" type="button" onClick={onBack}>
+          返回
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -246,7 +360,7 @@ function LauncherFooter({
             </svg>
             {latestVersion && (
               <span
-                className="absolute -top-0.5 -left-0.5 flex h-2 w-2"
+                className="absolute -top-1 -right-1 flex h-2 w-2"
                 aria-hidden="true"
                 data-testid="launcher-update-indicator"
               >

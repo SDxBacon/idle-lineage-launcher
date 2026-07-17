@@ -5,6 +5,62 @@
 // @ts-ignore: Unused imports
 import { Create as $Create } from "@wailsio/runtime";
 
+/**
+ * GameBrowser is a browser that the operating system has registered as able to
+ * open the game's local HTML entry point. ID is an opaque platform identifier;
+ * callers must not interpret it as an executable path or command.
+ */
+export class GameBrowser {
+    "id": string;
+    "name": string;
+
+    /** Creates a new GameBrowser instance. */
+    constructor($$source: Partial<GameBrowser> = {}) {
+        if (!("id" in $$source)) {
+            this["id"] = "";
+        }
+        if (!("name" in $$source)) {
+            this["name"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new GameBrowser instance from a string or object.
+     */
+    static createFrom($$source: any = {}): GameBrowser {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new GameBrowser($$parsedSource as Partial<GameBrowser>);
+    }
+}
+
+/**
+ * GameLaunchResult describes a successful launch. FallbackToDefault is true
+ * only when the selected browser failed and the system default handler then
+ * accepted the game entry.
+ */
+export class GameLaunchResult {
+    "fallbackToDefault": boolean;
+
+    /** Creates a new GameLaunchResult instance. */
+    constructor($$source: Partial<GameLaunchResult> = {}) {
+        if (!("fallbackToDefault" in $$source)) {
+            this["fallbackToDefault"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new GameLaunchResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): GameLaunchResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new GameLaunchResult($$parsedSource as Partial<GameLaunchResult>);
+    }
+}
+
 export class GameState {
     "revision": number;
     "status": GameStatus;

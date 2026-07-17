@@ -9,7 +9,6 @@ import (
 	"strings"
 )
 
-type fileOpener func(string) error
 type urlOpener func(string) error
 type folderOpener func(string, bool) error
 
@@ -21,11 +20,11 @@ type LauncherInfo struct {
 }
 
 type LauncherService struct {
-	manager    *gameManager
-	version    string
-	openFile   fileOpener
-	openURL    urlOpener
-	openFolder folderOpener
+	manager      *gameManager
+	version      string
+	gameLauncher *GameLauncher
+	openURL      urlOpener
+	openFolder   folderOpener
 }
 
 func (service *LauncherService) GetLauncherInfo() LauncherInfo {
@@ -62,30 +61,38 @@ func (service *LauncherService) CancelInstall() {
 	service.manager.CancelInstall()
 }
 
-func (service *LauncherService) LaunchGame() error {
+func (service *LauncherService) GetGameBrowsers() ([]GameBrowser, error) {
+	slog.Info("backend service call", "method", "GetGameBrowsers")
+	if service == nil || service.gameLauncher == nil {
+		return nil, errors.New("game launcher is unavailable")
+	}
+	return service.gameLauncher.GetAvailableBrowsers()
+}
+
+func (service *LauncherService) LaunchGame(browserID *string) (GameLaunchResult, error) {
 	slog.Info("backend service call", "method", "LaunchGame")
 	if service == nil || service.manager == nil {
-		return errors.New("game manager is unavailable")
+		return GameLaunchResult{}, errors.New("game manager is unavailable")
 	}
 	if missing, err := service.manager.reconcileMissingActiveGame(); err != nil {
-		return err
+		return GameLaunchResult{}, err
 	} else if missing {
-		return nil
+		return GameLaunchResult{}, nil
 	}
-	return service.manager.withLaunchableRoot(func(root string) error {
+	var result GameLaunchResult
+	err := service.manager.withLaunchableRoot(func(root string) error {
 		entry, err := validatedGameEntry(root)
 		if err != nil {
 			return err
 		}
-		if service.openFile == nil {
-			return errors.New("system file opener is unavailable")
+		if service.gameLauncher == nil {
+			return errors.New("game launcher is unavailable")
 		}
-		slog.Info("opening game entry with system HTML handler", "entry", entry)
-		if err := service.openFile(entry); err != nil {
-			return fmt.Errorf("open game entry: %w", err)
-		}
-		return nil
+		slog.Info("opening game entry", "entry", entry, "custom_browser", browserID != nil)
+		result, err = service.gameLauncher.Launch(entry, browserID)
+		return err
 	})
+	return result, err
 }
 
 func (service *LauncherService) OpenGameFolder() error {
