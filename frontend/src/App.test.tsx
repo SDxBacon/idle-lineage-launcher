@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => {
     openGameFolder: vi.fn(),
     openGameRepository: vi.fn(),
     openLauncherRepository: vi.fn(),
+    fetchLatestRelease: vi.fn(),
     unsubscribe: vi.fn(),
   };
 });
@@ -102,6 +103,13 @@ function emit(name: string, data: unknown = {}) {
   });
 }
 
+function releaseResponse(tagName: unknown, ok = true) {
+  return {
+    ok,
+    json: vi.fn().mockResolvedValue({ tag_name: tagName }),
+  } as unknown as Response;
+}
+
 describe('App', () => {
   beforeEach(() => {
     mocks.listeners.clear();
@@ -118,10 +126,13 @@ describe('App', () => {
     mocks.openGameFolder.mockResolvedValue(undefined);
     mocks.openGameRepository.mockResolvedValue(undefined);
     mocks.openLauncherRepository.mockResolvedValue(undefined);
+    mocks.fetchLatestRelease.mockResolvedValue(releaseResponse('v0.1.0'));
+    vi.stubGlobal('fetch', mocks.fetchLatestRelease);
   });
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   it('reads local state and launcher info, renders repository links, and downloads after confirmation', async () => {
@@ -133,6 +144,8 @@ describe('App', () => {
       name: '在 GitHub 開啟 shines871/idle-lineage-class',
     });
     expect(repositoryBadge).toHaveTextContent('shines871/idle-lineage-class');
+    expect(repositoryBadge).not.toHaveTextContent('遊戲來源');
+    expect(screen.getByText('遊戲來源')).toHaveClass('status-badge-label');
     expect(repositoryBadge).toHaveClass('status-badge');
     expect(repositoryBadge.className).not.toContain('status-missing');
     expect(screen.getByText('v0.1.0')).toBeInTheDocument();
@@ -141,6 +154,8 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: '遊戲資料夾' })).not.toBeInTheDocument();
     expect(mocks.getGameState).toHaveBeenCalledTimes(1);
     expect(mocks.getLauncherInfo).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mocks.fetchLatestRelease).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId('launcher-update-indicator')).not.toBeInTheDocument();
     expect(mocks.startInstall).not.toHaveBeenCalled();
     expect(mocks.checkForUpdate).not.toHaveBeenCalled();
 
@@ -153,6 +168,48 @@ describe('App', () => {
     expect(mocks.startInstall).toHaveBeenCalledTimes(1);
   });
 
+  it('shows an animated update indicator and tooltip for a newer launcher release', async () => {
+    mocks.fetchLatestRelease.mockResolvedValueOnce(releaseResponse('v0.2.0'));
+    mocks.getGameState.mockResolvedValue(state());
+    render(<App />);
+
+    const githubButton = await screen.findByRole('button', {
+      name: '在 GitHub 開啟 Idle Lineage Launcher；有更新版本 v0.2.0 可供下載',
+    });
+    const indicator = screen.getByTestId('launcher-update-indicator');
+    expect(indicator).toHaveAttribute('aria-hidden', 'true');
+    expect(indicator).toHaveClass('absolute', '-top-1', '-right-1');
+    expect(indicator.parentElement).toHaveClass('relative', 'h-4', 'w-4');
+    expect(indicator.querySelector('.animate-ping')).toBeInTheDocument();
+    expect(indicator.querySelector('.animate-pulse')).toBeInTheDocument();
+    expect(githubButton).toHaveAttribute(
+      'data-tooltip-content',
+      '有更新版本 v0.2.0 可供下載',
+    );
+
+    fireEvent.mouseEnter(githubButton);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('有更新版本 v0.2.0 可供下載');
+
+    fireEvent.mouseLeave(githubButton);
+    await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
+    fireEvent.focus(githubButton);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('有更新版本 v0.2.0 可供下載');
+
+    fireEvent.click(githubButton);
+    expect(mocks.openLauncherRepository).toHaveBeenCalledTimes(1);
+  });
+
+  it('silently ignores launcher release lookup failures', async () => {
+    mocks.fetchLatestRelease.mockRejectedValueOnce(new Error('GitHub is unavailable'));
+    mocks.getGameState.mockResolvedValue(state());
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
+    await waitFor(() => expect(mocks.fetchLatestRelease).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId('launcher-update-indicator')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('keeps game controls usable when launcher metadata cannot be read', async () => {
     mocks.getLauncherInfo.mockRejectedValueOnce(new Error('無法取得 launcher metadata'));
     mocks.getGameState.mockResolvedValue(state());
@@ -162,6 +219,7 @@ describe('App', () => {
     expect(screen.getByText('v—')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '正在讀取遊戲 repository' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent('無法取得 launcher metadata');
+    expect(mocks.fetchLatestRelease).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('button', { name: '下載遊戲' }));
     expect(mocks.startInstall).toHaveBeenCalledTimes(1);

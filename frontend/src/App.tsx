@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { Tooltip } from 'react-tooltip';
 import { Events } from '@wailsio/runtime';
 import {
   GameState,
@@ -6,11 +7,13 @@ import {
   LauncherService,
   type LauncherInfo,
 } from '../bindings/github.com/SDxBacon/idle-lineage-launcher';
+import { fetchNewerLauncherVersion } from './launcherRelease';
 import './App.css';
 
 function App() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [launcherInfo, setLauncherInfo] = useState<LauncherInfo | null>(null);
+  const [latestLauncherVersion, setLatestLauncherVersion] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
 
   useEffect(() => {
@@ -40,6 +43,24 @@ function App() {
     };
   }, []);
 
+  const launcherVersion = launcherInfo?.version || '';
+  useEffect(() => {
+    setLatestLauncherVersion(null);
+    if (!launcherVersion) {
+      return;
+    }
+
+    const controller = new AbortController();
+    void fetchNewerLauncherVersion(launcherVersion, controller.signal)
+      .then(latestVersion => {
+        if (!controller.signal.aborted) {
+          setLatestLauncherVersion(latestVersion);
+        }
+      });
+
+    return () => controller.abort();
+  }, [launcherVersion]);
+
   const runAction = (action: () => Promise<void>) => {
     setActionError('');
     void action().catch(error => setActionError(readError(error)));
@@ -49,6 +70,7 @@ function App() {
     return (
       <StatusShell
         launcherInfo={launcherInfo}
+        latestLauncherVersion={latestLauncherVersion}
         onOpenLauncherRepository={() => runAction(() => LauncherService.OpenLauncherRepository())}
       >
         <LoadingMark />
@@ -74,6 +96,7 @@ function App() {
   return (
     <StatusShell
       launcherInfo={launcherInfo}
+      latestLauncherVersion={latestLauncherVersion}
       onOpenLauncherRepository={() => runAction(() => LauncherService.OpenLauncherRepository())}
     >
       <header className="launcher-header">
@@ -82,17 +105,20 @@ function App() {
           <p className="eyebrow">IDLE LINEAGE LAUNCHER</p>
           <h1>{statusTitle(status)}</h1>
         </div>
-        <button
-          className="status-badge"
-          type="button"
-          disabled={!launcherInfo?.gameRepository}
-          aria-label={launcherInfo?.gameRepository
-            ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
-            : '正在讀取遊戲 repository'}
-          onClick={() => runAction(() => LauncherService.OpenGameRepository())}
-        >
-          {launcherInfo?.gameRepository || '—'}
-        </button>
+        <div className="status-badge-field">
+          <span className="status-badge-label">遊戲來源</span>
+          <button
+            className="status-badge"
+            type="button"
+            disabled={!launcherInfo?.gameRepository}
+            aria-label={launcherInfo?.gameRepository
+              ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
+              : '正在讀取遊戲 repository'}
+            onClick={() => runAction(() => LauncherService.OpenGameRepository())}
+          >
+            {launcherInfo?.gameRepository || '—'}
+          </button>
+        </div>
       </header>
 
       <p className="lead">{gameState.message || statusDescription(status)}</p>
@@ -161,10 +187,12 @@ function App() {
 function StatusShell({
   children,
   launcherInfo,
+  latestLauncherVersion,
   onOpenLauncherRepository,
 }: {
   children: ReactNode;
   launcherInfo: LauncherInfo | null;
+  latestLauncherVersion: string | null;
   onOpenLauncherRepository: () => void;
 }) {
   return (
@@ -173,6 +201,7 @@ function StatusShell({
         <section className="status-card">{children}</section>
         <LauncherFooter
           version={launcherInfo?.version || ''}
+          latestVersion={latestLauncherVersion}
           onOpenLauncherRepository={onOpenLauncherRepository}
         />
       </div>
@@ -182,28 +211,54 @@ function StatusShell({
 
 function LauncherFooter({
   version,
+  latestVersion,
   onOpenLauncherRepository,
 }: {
   version: string;
+  latestVersion: string | null;
   onOpenLauncherRepository: () => void;
 }) {
+  const updateTooltipID = 'launcher-update-tooltip';
+  const updateMessage = latestVersion
+    ? `有更新版本 v${latestVersion} 可供下載`
+    : '';
+
   return (
-    <footer className="launcher-footer">
-      <span>{version ? `v${version}` : 'v—'}</span>
-      <span aria-hidden="true">·</span>
-      <span>SDxBacon</span>
-      <span aria-hidden="true">·</span>
-      <button
-        className="github-button"
-        type="button"
-        aria-label="在 GitHub 開啟 Idle Lineage Launcher"
-        onClick={onOpenLauncherRepository}
-      >
-        <svg viewBox="0 0 16 16" aria-hidden="true">
-          <path d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.63 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.5-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 0 1 8 3.88a7.5 7.5 0 0 1 2 .28c1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.51 0 1.09-.01 1.97-.01 2.24 0 .22.15.47.55.39A8.12 8.12 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z" />
-        </svg>
-      </button>
-    </footer>
+    <>
+      <footer className="launcher-footer">
+        <span>{version ? `v${version}` : 'v—'}</span>
+        <span aria-hidden="true">·</span>
+        <span>SDxBacon</span>
+        <span aria-hidden="true">·</span>
+        <button
+          className="github-button"
+          type="button"
+          aria-label={updateMessage
+            ? `在 GitHub 開啟 Idle Lineage Launcher；${updateMessage}`
+            : '在 GitHub 開啟 Idle Lineage Launcher'}
+          data-tooltip-id={latestVersion ? updateTooltipID : undefined}
+          data-tooltip-content={latestVersion ? updateMessage : undefined}
+          onClick={onOpenLauncherRepository}
+        >
+          <span className="relative flex h-4 w-4">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.63 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.5-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 0 1 8 3.88a7.5 7.5 0 0 1 2 .28c1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.51 0 1.09-.01 1.97-.01 2.24 0 .22.15.47.55.39A8.12 8.12 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z" />
+            </svg>
+            {latestVersion && (
+              <span
+                className="absolute -top-0.5 -left-0.5 flex h-2 w-2"
+                aria-hidden="true"
+                data-testid="launcher-update-indicator"
+              >
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75 motion-reduce:animate-none" />
+                <span className="relative inline-flex h-2 w-2 animate-pulse rounded-full bg-red-500 motion-reduce:animate-none" />
+              </span>
+            )}
+          </span>
+        </button>
+      </footer>
+      {latestVersion && <Tooltip id={updateTooltipID} place="top" />}
+    </>
   );
 }
 
