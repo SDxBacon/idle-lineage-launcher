@@ -1,133 +1,55 @@
 # Idle Lineage Launcher
 
-Wails v3 + React TypeScript desktop launcher for
-[shines871/idle-lineage-class](https://github.com/shines871/idle-lineage-class).
-It is a launcher only: the game is not bundled in the app or embedded in an
-iframe.
+這是一款適用於《放置天堂》的桌面啟動器，使用 Wails v3 與 React TypeScript 製作。
 
-At startup, the launcher checks the local working tree at
-`game/shines871` inside the platform application-data directory. If no valid
-installation exists, it displays **尚未下載遊戲** and performs no clone or
-other network operation. Downloading begins only after the user clicks the
-download button; the Go backend then uses `go-git` to shallow-clone the official
-`main` branch.
+《放置天堂》由「秋玥」製作，相關內容分享於[巴哈姆特](https://forum.gamer.com.tw/C.php?bsn=84452&snA=8362&tnum=2953)以及 [GitHub](https://github.com/shines871/idle-lineage-class)。
 
-When an installation already exists, startup schedules a background update
-check. Manual and startup checks force-fetch the configured official `main`
-reference without modifying game files, then compare only the local and remote
-HEAD hashes. Local commits, rewritten remote history, shallow history, detached
-HEAD, and working-tree changes do not block this comparison.
+這個 Launcher 的主要目標是打包 Git 更新流程，提供各位一鍵下載離線版，同時可以一鍵透過瀏覽器開啟遊戲。
 
-Updates run only when requested by the user. The launcher fetches `main` again,
-hard-resets the managed branch and working tree to that exact commit, discards
-all tracked changes, and removes untracked and ignored paths that are not part
-of the official tree. Cleanup still attempts to remove Finder metadata, but an
-untracked regular file named exactly `.DS_Store` is tolerated at any depth if
-Finder recreates it. All other non-official paths are removed, so the game
-directory remains a launcher-managed cache, not a place for user files.
+## 主要功能
 
-For each runtime repository, the launcher best-effort maintains `.DS_Store` in
-the local `.git/info/exclude`. This rule is never committed or pushed and does
-not modify the upstream `.gitignore`; the launcher applies the same exception
-during its own validation. If Git metadata is unusable, startup reports an error
-and offers the existing retry-download flow; it never turns a check into an
-update. Only after the user explicitly requests an update may synchronization
-fall back to downloading the latest official version into staging and swapping
-it in after validation. Network failures occur before working-tree game content
-is changed; other storage or permission failures are reported with a retryable
-message.
+- 下載並安裝官方遊戲
+- 開啟 Launcher 時自動檢查一次，之後可隨時手動檢查更新
+- 由使用者決定何時更新
+- 使用系統預設瀏覽器開啟遊戲
+- 顯示下載與更新進度
 
-Git `HEAD` remains the installed-version source of truth, so no separate
-active-version manifest is written. Transfers publish localized progress plus
-a one-second heartbeat to the UI, while detailed Git lifecycle and sideband
-information is retained in structured launcher logs.
+## 使用方式
 
-The launch button validates `game/shines871/index.html` and passes that file to
-the operating system through Wails `app.Browser.OpenFile`. This does not force
-Safari, Edge, or another built-in browser: the app associated with `.html` files
-opens it. For example, if `.html` files default to Chrome, the game opens in
-Chrome; a non-browser association may open a different app instead. A successful
-call means the operating system accepted the open request, not that the browser
-finished loading the page. Native opener errors are shown in the launcher.
+1. 開啟啟動器。
+2. 尚未安裝遊戲時，點選「下載遊戲」。
+3. 有新版本時，點選更新即可同步至官方最新版本。
+4. 點選「啟動遊戲」，使用系統預設瀏覽器遊玩。
 
-## Development
+## 注意事項
 
-Requirements: Go 1.25+, Node.js 22+, Wails v3.0.0-alpha.97, and Task.
+- 更新會以官方版本覆蓋遊戲檔案，請勿在遊戲目錄中存放個人檔案。
+- Launcher 只會在開啟時自動檢查一次更新。程式持續開啟期間不會再次自動檢查，請手動點選「檢查更新」。
+- 遊戲存檔由瀏覽器管理；更換瀏覽器或瀏覽器設定檔後，可能無法看到原本的存檔。
+- 遊戲已開啟時，更新後需重新整理頁面或重新啟動遊戲。
+
+## 開發環境
+
+需要安裝以下工具：
+
+- Go 1.25 以上版本
+- Node.js 22 以上版本
+- Wails CLI v3.0.0-alpha.97（指令名稱為 `wails3`）
+- Task
+
+第一次執行時，先在專案根目錄安裝 Go 與前端依賴：
 
 ```sh
+go mod download
 npm install --prefix frontend
-wails3 dev
 ```
 
-Development builds fetch
-`7e30bc454196683129b8a883a2a1e6011f35bcc6` directly by exact SHA for the first
-install, making the normal fetch/reset update flow easy to test without first
-downloading the current `main` tip. If the Git server does not support exact-SHA
-fetches, the installer falls back to fetching the full `main` history.
-Production builds continue to shallow-clone the `main` tip.
-
-Run all automated tests:
+啟動開發模式：
 
 ```sh
-task test
+task dev
 ```
 
-Build the current platform:
+這個指令會啟動 Wails 開發模式與前端開發伺服器。
 
-```sh
-task build
-```
-
-## Release artifacts
-
-The v1 release tasks intentionally produce ad-hoc or unsigned artifacts:
-
-```sh
-task release
-
-# Or build one platform only:
-task release:macos
-task release:windows
-
-# Build all release assets, create the v0.2.0 tag, and open a GitHub draft release:
-task release:auto VERSION=0.2.0
-```
-
-The combined `task release` command must run on macOS. It creates separate
-arm64 and amd64 DMGs containing the app and an Applications shortcut, followed
-by one cross-compiled Windows amd64 portable executable. Outputs are written to
-`release/0.1.0/` and no game content is included. Override the output version
-with, for example, `task release VERSION=0.2.0`.
-
-`task release:auto` additionally requires an authenticated GitHub CLI (`gh auth
-login -h github.com`), a clean `main` working tree, and a local commit matching
-the remote `main` branch. It creates the version tag automatically, uploads all
-three artifacts to a draft GitHub release, and generates release notes. Publish
-the draft manually after reviewing its files and notes.
-
-## Runtime data
-
-- macOS: `~/Library/Application Support/IdleLineageLauncher/`
-- Windows: `%LOCALAPPDATA%/IdleLineageLauncher/`
-
-The relevant subdirectories are:
-
-- `game/shines871/`: the launcher-managed active Git working tree; the entry
-  point is `game/shines871/index.html`. Updates discard local changes and delete
-  non-official files except untracked regular `.DS_Store` Finder metadata. Do
-  not store user files here.
-- `game/staging/`: temporary clone data used while installing.
-- `webview/`: the launcher UI's Windows WebView2 profile. The externally opened
-  game does not use this profile.
-
-An old `game/src` directory is neither migrated nor treated as the active
-installation. It is left untouched, and the launcher offers a new download into
-`game/shines871`.
-
-The game runs from a local `file://` URL in the selected browser. An already
-open game tab is not automatically reloaded after an update; refresh it or
-launch the game again to use the updated files. Saves belong to that browser's
-local file storage and profile. Another browser or browser profile may therefore
-not see the same save, and clearing that browser's site/local data may remove it.
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party notices.
+第三方聲明請參閱 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
