@@ -27,12 +27,24 @@
 2. 尚未安裝遊戲時，點選「下載遊戲」。
 3. 有新版本時，點選更新即可同步至官方最新版本。
 4. 點選「啟動遊戲」，使用系統預設瀏覽器遊玩。
+5. （可選）匯入遊戲進度
+   - 原本使用線上版，請將線上版的進度匯出，並匯入離線版。
+   - 原本使用離線版，照理說進度會共享。若沒有共通，也走匯出、匯入流程即可。
 
 或著，請看操作示範影片
 
 <video src="https://www.youtube.com/watch?v=lSfKQv8IMv4" width="320" height="240" controls></video>
 
 [![How to Use](https://img.youtube.com/vi/lSfKQv8IMv4/0.jpg)](https://www.youtube.com/watch?v=lSfKQv8IMv4)
+
+## 遊戲檔案儲存路徑
+
+Launcher 下載的遊戲檔案會儲存在以下位置：
+
+- macOS：`~/Library/Application Support/IdleLineageLauncher/game/shines871`
+- Windows：`%LOCALAPPDATA%\IdleLineageLauncher\game\shines871`
+
+以上是遊戲檔案的儲存位置；遊戲進度仍由瀏覽器負責保存與管理。
 
 ## 第一次開啟
 
