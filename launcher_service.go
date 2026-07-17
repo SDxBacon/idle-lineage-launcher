@@ -10,12 +10,31 @@ import (
 )
 
 type fileOpener func(string) error
+type urlOpener func(string) error
 type folderOpener func(string, bool) error
+
+const launcherRepositoryPageURL = "https://github.com/SDxBacon/idle-lineage-launcher"
+
+type LauncherInfo struct {
+	Version        string `json:"version"`
+	GameRepository string `json:"gameRepository"`
+}
 
 type LauncherService struct {
 	manager    *gameManager
+	version    string
 	openFile   fileOpener
+	openURL    urlOpener
 	openFolder folderOpener
+}
+
+func (service *LauncherService) GetLauncherInfo() LauncherInfo {
+	slog.Info("backend service call", "method", "GetLauncherInfo")
+	info := LauncherInfo{GameRepository: gameRepository}
+	if service != nil {
+		info.Version = service.version
+	}
+	return info
 }
 
 func (service *LauncherService) GetGameState() GameState {
@@ -89,6 +108,27 @@ func (service *LauncherService) OpenGameFolder() error {
 	slog.Info("opening installed game directory", "directory", root)
 	if err := service.openFolder(root, false); err != nil {
 		return fmt.Errorf("open game folder: %w", err)
+	}
+	return nil
+}
+
+func (service *LauncherService) OpenGameRepository() error {
+	slog.Info("backend service call", "method", "OpenGameRepository")
+	return service.openBrowserURL("game repository", gameRepositoryPageURL)
+}
+
+func (service *LauncherService) OpenLauncherRepository() error {
+	slog.Info("backend service call", "method", "OpenLauncherRepository")
+	return service.openBrowserURL("launcher repository", launcherRepositoryPageURL)
+}
+
+func (service *LauncherService) openBrowserURL(label, url string) error {
+	if service == nil || service.openURL == nil {
+		return errors.New("system URL opener is unavailable")
+	}
+	slog.Info("opening URL in system browser", "target", label, "url", url)
+	if err := service.openURL(url); err != nil {
+		return fmt.Errorf("open %s: %w", label, err)
 	}
 	return nil
 }

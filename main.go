@@ -14,6 +14,9 @@ var assets embed.FS
 //go:embed build/appicon.png
 var appIcon []byte
 
+// version is injected from Taskfile.yml at build time with -ldflags.
+var version = ""
+
 func init() {
 	application.RegisterEvent[GameState]("launcher:game-state")
 }
@@ -37,7 +40,7 @@ func main() {
 	}
 
 	windows := &windowFactory{}
-	service := &LauncherService{manager: manager}
+	service := &LauncherService{manager: manager, version: version}
 	app = application.New(application.Options{
 		Name:        "Idle Lineage Launcher",
 		Description: "Desktop launcher for Idle Lineage Class",
@@ -67,6 +70,7 @@ func main() {
 		},
 	})
 	service.openFile = app.Browser.OpenFile
+	service.openURL = app.Browser.OpenURL
 	service.openFolder = app.Env.OpenFileManager
 	windows.app = app
 	windows.Create()

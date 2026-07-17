@@ -23,12 +23,26 @@ export function GetGameState(): $CancellablePromise<$models.GameState> {
     });
 }
 
+export function GetLauncherInfo(): $CancellablePromise<$models.LauncherInfo> {
+    return $Call.ByID(2292426071).then(($result: any) => {
+        return $$createType1($result);
+    });
+}
+
 export function LaunchGame(): $CancellablePromise<void> {
     return $Call.ByID(2893946080);
 }
 
 export function OpenGameFolder(): $CancellablePromise<void> {
     return $Call.ByID(1309839059);
+}
+
+export function OpenGameRepository(): $CancellablePromise<void> {
+    return $Call.ByID(2976509643);
+}
+
+export function OpenLauncherRepository(): $CancellablePromise<void> {
+    return $Call.ByID(2042697873);
 }
 
 export function StartInstall(): $CancellablePromise<void> {
@@ -41,3 +55,4 @@ export function StartUpdate(): $CancellablePromise<void> {
 
 // Private type creation functions
 const $$createType0 = $models.GameState.createFrom;
+const $$createType1 = $models.LauncherInfo.createFrom;

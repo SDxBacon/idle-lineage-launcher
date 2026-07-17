@@ -7,12 +7,15 @@ const mocks = vi.hoisted(() => {
   return {
     listeners,
     getGameState: vi.fn(),
+    getLauncherInfo: vi.fn(),
     startInstall: vi.fn(),
     checkForUpdate: vi.fn(),
     startUpdate: vi.fn(),
     cancelInstall: vi.fn(),
     launchGame: vi.fn(),
     openGameFolder: vi.fn(),
+    openGameRepository: vi.fn(),
+    openLauncherRepository: vi.fn(),
     unsubscribe: vi.fn(),
   };
 });
@@ -48,12 +51,15 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
   },
   LauncherService: {
     GetGameState: mocks.getGameState,
+    GetLauncherInfo: mocks.getLauncherInfo,
     StartInstall: mocks.startInstall,
     CheckForUpdate: mocks.checkForUpdate,
     StartUpdate: mocks.startUpdate,
     CancelInstall: mocks.cancelInstall,
     LaunchGame: mocks.launchGame,
     OpenGameFolder: mocks.openGameFolder,
+    OpenGameRepository: mocks.openGameRepository,
+    OpenLauncherRepository: mocks.openLauncherRepository,
   },
 }));
 
@@ -100,31 +106,78 @@ describe('App', () => {
   beforeEach(() => {
     mocks.listeners.clear();
     vi.clearAllMocks();
+    mocks.getLauncherInfo.mockResolvedValue({
+      version: '0.1.0',
+      gameRepository: 'shines871/idle-lineage-class',
+    });
     mocks.startInstall.mockResolvedValue(undefined);
     mocks.checkForUpdate.mockResolvedValue(undefined);
     mocks.startUpdate.mockResolvedValue(undefined);
     mocks.cancelInstall.mockResolvedValue(undefined);
     mocks.launchGame.mockResolvedValue(undefined);
     mocks.openGameFolder.mockResolvedValue(undefined);
+    mocks.openGameRepository.mockResolvedValue(undefined);
+    mocks.openLauncherRepository.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     cleanup();
   });
 
-  it('performs only a local state read on first render and downloads after confirmation', async () => {
+  it('reads local state and launcher info, renders repository links, and downloads after confirmation', async () => {
     mocks.getGameState.mockResolvedValue(state());
     render(<App />);
 
     expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
+    const repositoryBadge = await screen.findByRole('button', {
+      name: '在 GitHub 開啟 shines871/idle-lineage-class',
+    });
+    expect(repositoryBadge).toHaveTextContent('shines871/idle-lineage-class');
+    expect(repositoryBadge).toHaveClass('status-badge');
+    expect(repositoryBadge.className).not.toContain('status-missing');
+    expect(screen.getByText('v0.1.0')).toBeInTheDocument();
+    expect(screen.getByText('SDxBacon').closest('footer')).toHaveClass('launcher-footer');
     expect(screen.getByText('約 500–800 MB')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '遊戲資料夾' })).not.toBeInTheDocument();
+    expect(mocks.getGameState).toHaveBeenCalledTimes(1);
+    expect(mocks.getLauncherInfo).toHaveBeenCalledTimes(1);
     expect(mocks.startInstall).not.toHaveBeenCalled();
     expect(mocks.checkForUpdate).not.toHaveBeenCalled();
 
+    fireEvent.click(repositoryBadge);
+    fireEvent.click(screen.getByRole('button', { name: '在 GitHub 開啟 Idle Lineage Launcher' }));
     fireEvent.click(screen.getByRole('button', { name: '下載遊戲' }));
 
+    expect(mocks.openGameRepository).toHaveBeenCalledTimes(1);
+    expect(mocks.openLauncherRepository).toHaveBeenCalledTimes(1);
     expect(mocks.startInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps game controls usable when launcher metadata cannot be read', async () => {
+    mocks.getLauncherInfo.mockRejectedValueOnce(new Error('無法取得 launcher metadata'));
+    mocks.getGameState.mockResolvedValue(state());
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
+    expect(screen.getByText('v—')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '正在讀取遊戲 repository' })).toBeDisabled();
+    expect(screen.getByRole('alert')).toHaveTextContent('無法取得 launcher metadata');
+
+    fireEvent.click(screen.getByRole('button', { name: '下載遊戲' }));
+    expect(mocks.startInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports repository opener failures through the existing inline error', async () => {
+    mocks.openGameRepository.mockRejectedValueOnce(new Error('無法開啟 GitHub'));
+    mocks.getGameState.mockResolvedValue(state());
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: '在 GitHub 開啟 shines871/idle-lineage-class',
+    }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('無法開啟 GitHub');
+    expect(screen.getByRole('button', { name: '下載遊戲' })).toBeEnabled();
   });
 
   it('renders install progress and lets the user cancel the download', async () => {
@@ -223,7 +276,11 @@ describe('App', () => {
     }));
     render(<App />);
 
-    expect(await screen.findByText('可啟動')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: '遊戲已就緒' })).toBeInTheDocument();
+    expect(screen.getByRole('button', {
+      name: '在 GitHub 開啟 shines871/idle-lineage-class',
+    })).toHaveTextContent('shines871/idle-lineage-class');
+    expect(screen.queryByText('可啟動')).not.toBeInTheDocument();
     expect(screen.queryByText('已是最新版本')).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('fetch origin/main failed');
   });

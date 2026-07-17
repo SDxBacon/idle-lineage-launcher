@@ -90,3 +90,28 @@ export enum GameStatus {
     StatusCancelled = "cancelled",
     StatusError = "error",
 };
+
+export class LauncherInfo {
+    "version": string;
+    "gameRepository": string;
+
+    /** Creates a new LauncherInfo instance. */
+    constructor($$source: Partial<LauncherInfo> = {}) {
+        if (!("version" in $$source)) {
+            this["version"] = "";
+        }
+        if (!("gameRepository" in $$source)) {
+            this["gameRepository"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new LauncherInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): LauncherInfo {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new LauncherInfo($$parsedSource as Partial<LauncherInfo>);
+    }
+}

@@ -9,6 +9,62 @@ import (
 	"time"
 )
 
+func TestGetLauncherInfoReturnsBuildVersionAndGameRepository(t *testing.T) {
+	service := &LauncherService{version: "1.2.3"}
+
+	info := service.GetLauncherInfo()
+
+	if info.Version != "1.2.3" || info.GameRepository != gameRepository {
+		t.Fatalf("unexpected launcher info: %+v", info)
+	}
+}
+
+func TestRepositoryOpenersUseFixedGitHubPages(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+		open func(*LauncherService) error
+	}{
+		{name: "game", want: gameRepositoryPageURL, open: (*LauncherService).OpenGameRepository},
+		{name: "launcher", want: launcherRepositoryPageURL, open: (*LauncherService).OpenLauncherRepository},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var opened string
+			service := &LauncherService{openURL: func(url string) error {
+				opened = url
+				return nil
+			}}
+
+			if err := test.open(service); err != nil {
+				t.Fatal(err)
+			}
+			if opened != test.want {
+				t.Fatalf("unexpected URL: got %q, want %q", opened, test.want)
+			}
+		})
+	}
+}
+
+func TestRepositoryOpenersRejectMissingSystemOpener(t *testing.T) {
+	service := &LauncherService{}
+	for _, open := range []func() error{service.OpenGameRepository, service.OpenLauncherRepository} {
+		if err := open(); err == nil || err.Error() != "system URL opener is unavailable" {
+			t.Fatalf("unexpected missing-opener error: %v", err)
+		}
+	}
+}
+
+func TestRepositoryOpenersReturnSystemOpenerErrors(t *testing.T) {
+	want := errors.New("opener failed")
+	service := &LauncherService{openURL: func(string) error { return want }}
+	for _, open := range []func() error{service.OpenGameRepository, service.OpenLauncherRepository} {
+		if err := open(); !errors.Is(err, want) {
+			t.Fatalf("unexpected opener error: %v", err)
+		}
+	}
+}
+
 func TestLaunchGameOpensAbsoluteInstalledEntry(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "game with spaces")
 	writeGameEntry(t, root)

@@ -4,11 +4,13 @@ import {
   GameState,
   GameStatus,
   LauncherService,
+  type LauncherInfo,
 } from '../bindings/github.com/SDxBacon/idle-lineage-launcher';
 import './App.css';
 
 function App() {
   const [gameState, setGameState] = useState<GameState | null>(null);
+  const [launcherInfo, setLauncherInfo] = useState<LauncherInfo | null>(null);
   const [actionError, setActionError] = useState('');
 
   useEffect(() => {
@@ -28,6 +30,9 @@ function App() {
     LauncherService.GetGameState()
       .then(applyState)
       .catch(error => mounted && setActionError(readError(error)));
+    LauncherService.GetLauncherInfo()
+      .then(info => mounted && setLauncherInfo(info))
+      .catch(error => mounted && setActionError(readError(error)));
 
     return () => {
       mounted = false;
@@ -42,7 +47,10 @@ function App() {
 
   if (!gameState) {
     return (
-      <StatusShell>
+      <StatusShell
+        launcherInfo={launcherInfo}
+        onOpenLauncherRepository={() => runAction(() => LauncherService.OpenLauncherRepository())}
+      >
         <LoadingMark />
         <p className="loading-copy">正在讀取遊戲狀態…</p>
         {actionError && <InlineError message={actionError} />}
@@ -64,14 +72,27 @@ function App() {
     || status === GameStatus.StatusUpdating;
 
   return (
-    <StatusShell>
+    <StatusShell
+      launcherInfo={launcherInfo}
+      onOpenLauncherRepository={() => runAction(() => LauncherService.OpenLauncherRepository())}
+    >
       <header className="launcher-header">
         <div className="brand-mark" aria-hidden="true">IL</div>
         <div>
           <p className="eyebrow">IDLE LINEAGE LAUNCHER</p>
           <h1>{statusTitle(status)}</h1>
         </div>
-        <span className={`status-badge status-${status}`}>{statusLabel(gameState)}</span>
+        <button
+          className="status-badge"
+          type="button"
+          disabled={!launcherInfo?.gameRepository}
+          aria-label={launcherInfo?.gameRepository
+            ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
+            : '正在讀取遊戲 repository'}
+          onClick={() => runAction(() => LauncherService.OpenGameRepository())}
+        >
+          {launcherInfo?.gameRepository || '—'}
+        </button>
       </header>
 
       <p className="lead">{gameState.message || statusDescription(status)}</p>
@@ -137,8 +158,53 @@ function App() {
   );
 }
 
-function StatusShell({ children }: { children: ReactNode }) {
-  return <main className="status-shell"><section className="status-card">{children}</section></main>;
+function StatusShell({
+  children,
+  launcherInfo,
+  onOpenLauncherRepository,
+}: {
+  children: ReactNode;
+  launcherInfo: LauncherInfo | null;
+  onOpenLauncherRepository: () => void;
+}) {
+  return (
+    <main className="status-shell">
+      <div className="status-layout">
+        <section className="status-card">{children}</section>
+        <LauncherFooter
+          version={launcherInfo?.version || ''}
+          onOpenLauncherRepository={onOpenLauncherRepository}
+        />
+      </div>
+    </main>
+  );
+}
+
+function LauncherFooter({
+  version,
+  onOpenLauncherRepository,
+}: {
+  version: string;
+  onOpenLauncherRepository: () => void;
+}) {
+  return (
+    <footer className="launcher-footer">
+      <span>{version ? `v${version}` : 'v—'}</span>
+      <span aria-hidden="true">·</span>
+      <span>SDxBacon</span>
+      <span aria-hidden="true">·</span>
+      <button
+        className="github-button"
+        type="button"
+        aria-label="在 GitHub 開啟 Idle Lineage Launcher"
+        onClick={onOpenLauncherRepository}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.64 0 8.13c0 3.59 2.29 6.63 5.47 7.71.4.08.55-.18.55-.39 0-.19-.01-.83-.01-1.5-2.01.38-2.53-.5-2.69-.96-.09-.23-.48-.96-.82-1.15-.28-.15-.68-.53-.01-.54.63-.01 1.08.59 1.23.83.72 1.23 1.87.88 2.33.67.07-.53.28-.88.51-1.08-1.78-.21-3.64-.91-3.64-4.02 0-.89.31-1.62.82-2.19-.08-.2-.36-1.04.08-2.16 0 0 .67-.22 2.2.84A7.5 7.5 0 0 1 8 3.88a7.5 7.5 0 0 1 2 .28c1.53-1.06 2.2-.84 2.2-.84.44 1.12.16 1.96.08 2.16.51.57.82 1.3.82 2.19 0 3.12-1.87 3.81-3.65 4.02.29.25.54.74.54 1.51 0 1.09-.01 1.97-.01 2.24 0 .22.15.47.55.39A8.12 8.12 0 0 0 16 8.13C16 3.64 12.42 0 8 0Z" />
+        </svg>
+      </button>
+    </footer>
+  );
 }
 
 function VersionSummary({ state }: { state: GameState }) {
@@ -252,33 +318,6 @@ function statusTitle(status: GameStatus) {
       return '尚未下載遊戲';
     default:
       return '尚未下載遊戲';
-  }
-}
-
-function statusLabel(state: GameState) {
-  switch (state.status) {
-    case GameStatus.StatusResolving:
-      return '準備中';
-    case GameStatus.StatusInstalling:
-      return '下載中';
-    case GameStatus.StatusReady:
-      return state.remoteCommit
-        && state.remoteCommit === state.commit
-        && !state.error
-        ? '已是最新版本'
-        : '可啟動';
-    case GameStatus.StatusChecking:
-      return '檢查中';
-    case GameStatus.StatusUpdateAvailable:
-      return '可更新';
-    case GameStatus.StatusUpdating:
-      return '更新中';
-    case GameStatus.StatusCancelled:
-      return '已取消';
-    case GameStatus.StatusError:
-      return '需要處理';
-    default:
-      return '尚未下載';
   }
 }
 

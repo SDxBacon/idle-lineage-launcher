@@ -8,5 +8,6 @@ export {
 
 export {
     GameState,
-    GameStatus
+    GameStatus,
+    LauncherInfo
 } from "./models.js";

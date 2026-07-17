@@ -25,10 +25,11 @@ import (
 )
 
 const (
-	gameRepository    = "shines871/idle-lineage-class"
-	gameRepositoryURL = "https://github.com/" + gameRepository + ".git"
-	gameBranch        = "main"
-	finderMetadata    = ".DS_Store"
+	gameRepository        = "shines871/idle-lineage-class"
+	gameRepositoryPageURL = "https://github.com/" + gameRepository
+	gameRepositoryURL     = gameRepositoryPageURL + ".git"
+	gameBranch            = "main"
+	finderMetadata        = ".DS_Store"
 )
 
 var (
