@@ -344,18 +344,6 @@ h1 {
   white-space: nowrap;
 }
 
-.inline-error {
-  margin: 22px 0 0;
-  padding: 12px 14px;
-  color: #fecaca;
-  font-size: 13px;
-  line-height: 1.5;
-  border: 1px solid rgba(248, 113, 113, 0.22);
-  border-radius: 12px;
-  background: rgba(127, 29, 29, 0.16);
-  user-select: text;
-}
-
 .game-launch-config {
   display: flex;
   align-items: center;

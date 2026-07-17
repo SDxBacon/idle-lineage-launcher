@@ -3,17 +3,23 @@ import { Settings as SettingsIcon } from 'lucide-react';
 import { Tooltip } from 'react-tooltip';
 import { toast } from 'sonner';
 import { Events } from '@wailsio/runtime';
+// import components
+import SettingsView from '@/SettingsView';
+import InlineError from '@/components/InlineError';
+import LoadingMark from '@/components/LoadingMark';
+import { Toaster } from '@/components/ui/sonner';
+import { useGameBrowsers } from '@/hooks/useGameBrowsers';
+import { fetchNewerLauncherVersion } from './launcherRelease';
+// import store
+import { useGameLaunchConfigStore } from '@/stores/useGameLaunchConfigStore';
+// import bindings
 import {
   GameState,
   GameStatus,
   LauncherService,
   type LauncherInfo,
 } from '../bindings/github.com/SDxBacon/idle-lineage-launcher';
-import { GameLaunchSelect } from '@/components/GameLaunchSelect';
-import { Toaster } from '@/components/ui/sonner';
-import { useGameBrowsers, type GameBrowserOptions } from '@/hooks/useGameBrowsers';
-import { fetchNewerLauncherVersion } from './launcherRelease';
-import { useGameLaunchConfigStore } from '@/stores/useGameLaunchConfigStore';
+// import css
 import './App.css';
 
 function App() {
@@ -284,32 +290,6 @@ function LauncherHeader({
   );
 }
 
-function SettingsView({
-  browsers,
-  loadState,
-  actionError,
-  onBack,
-}: GameBrowserOptions & {
-  actionError: string;
-  onBack: () => void;
-}) {
-  return (
-    <div className="settings-view">
-      <GameLaunchSelect browsers={browsers} loadState={loadState} />
-      <section className="settings-panel" aria-labelledby="game-folder-settings-title">
-        <h2 id="game-folder-settings-title">遊戲資料夾</h2>
-        <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
-      </section>
-      {actionError && <InlineError message={actionError} />}
-      <div className="settings-actions">
-        <button className="secondary-button" type="button" onClick={onBack}>
-          返回
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function StatusShell({
   children,
   launcherInfo,
@@ -479,18 +459,6 @@ function OperationProgress({ state }: { state: GameState }) {
       </div>
     </div>
   );
-}
-
-function InlineError({ message }: { message: string }) {
-  return (
-    <p className="inline-error" role="alert">
-      {message}
-    </p>
-  );
-}
-
-function LoadingMark() {
-  return <span className="loading-mark" aria-hidden="true" />;
 }
 
 function statusTitle(status: GameStatus) {
