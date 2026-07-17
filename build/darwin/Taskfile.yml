@@ -122,6 +122,8 @@ tasks:
     platforms: [darwin]
     cmds:
       - rm -rf "{{.BIN_DIR}}/release-{{.ARCH}}"
+      - rm -rf "{{.BIN_DIR}}/dmg-output-{{.ARCH}}"
+      - mkdir -p "{{.BIN_DIR}}/dmg-output-{{.ARCH}}"
       - task: build
         vars:
           ARCH: "{{.ARCH}}"
@@ -131,9 +133,15 @@ tasks:
           BINARY: "{{.BIN_DIR}}/{{.APP_NAME}}-{{.ARCH}}"
           APP_BUNDLE: "{{.BIN_DIR}}/release-{{.ARCH}}/Idle Lineage Launcher.app"
       - mkdir -p "release/{{.VERSION}}"
-      - ln -s /Applications "{{.BIN_DIR}}/release-{{.ARCH}}/Applications"
-      - hdiutil create -volname "Idle Lineage Launcher" -srcfolder "{{.BIN_DIR}}/release-{{.ARCH}}" -ov -format UDZO "release/{{.VERSION}}/{{.APP_NAME}}-macos-{{.ARCH}}.dmg"
+      - rm -f "release/{{.VERSION}}/{{.APP_NAME}}-macos-{{.ARCH}}.dmg"
+      - |
+        frontend/node_modules/.bin/create-dmg \
+          --no-code-sign \
+          "{{.BIN_DIR}}/release-{{.ARCH}}/Idle Lineage Launcher.app" \
+          "{{.BIN_DIR}}/dmg-output-{{.ARCH}}"
+      - mv "{{.BIN_DIR}}/dmg-output-{{.ARCH}}"/*.dmg "release/{{.VERSION}}/{{.APP_NAME}}-macos-{{.ARCH}}.dmg"
       - rm -rf "{{.BIN_DIR}}/release-{{.ARCH}}"
+      - rm -rf "{{.BIN_DIR}}/dmg-output-{{.ARCH}}"
       - rm -f "{{.BIN_DIR}}/{{.APP_NAME}}-{{.ARCH}}"
     vars:
       VERSION: '{{.VERSION | default "0.1.0"}}'
