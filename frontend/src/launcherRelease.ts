@@ -1,4 +1,5 @@
-const latestReleaseURL = 'https://api.github.com/repos/SDxBacon/idle-lineage-launcher/releases/latest';
+const latestReleaseURL =
+  'https://api.github.com/repos/SDxBacon/idle-lineage-launcher/releases/latest';
 const launcherVersionPattern = /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 type ParsedLauncherVersion = {
@@ -12,11 +13,7 @@ function parseLauncherVersion(version: string): ParsedLauncherVersion | null {
     return null;
   }
 
-  const parts: [number, number, number] = [
-    Number(match[1]),
-    Number(match[2]),
-    Number(match[3]),
-  ];
+  const parts: [number, number, number] = [Number(match[1]), Number(match[2]), Number(match[3])];
   if (!parts.every(Number.isSafeInteger)) {
     return null;
   }

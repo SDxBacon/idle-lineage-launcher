@@ -81,12 +81,11 @@ function LauncherDashboard() {
     }
 
     const controller = new AbortController();
-    void fetchNewerLauncherVersion(launcherVersion, controller.signal)
-      .then(latestVersion => {
-        if (!controller.signal.aborted) {
-          setLatestLauncherVersion(latestVersion);
-        }
-      });
+    void fetchNewerLauncherVersion(launcherVersion, controller.signal).then(latestVersion => {
+      if (!controller.signal.aborted) {
+        setLatestLauncherVersion(latestVersion);
+      }
+    });
 
     return () => controller.abort();
   }, [launcherVersion]);
@@ -128,17 +127,19 @@ function LauncherDashboard() {
   }
 
   const status = gameState.status;
-  const installing = status === GameStatus.StatusResolving || status === GameStatus.StatusInstalling;
+  const installing =
+    status === GameStatus.StatusResolving || status === GameStatus.StatusInstalling;
   const installed = isInstalledState(status);
-  const canInstall = status === GameStatus.StatusMissing
-    || status === GameStatus.StatusCancelled
-    || status === GameStatus.StatusError;
-  const canLaunch = status === GameStatus.StatusReady
-    || status === GameStatus.StatusChecking
-    || status === GameStatus.StatusUpdateAvailable;
-  const showProgress = installing
-    || status === GameStatus.StatusChecking
-    || status === GameStatus.StatusUpdating;
+  const canInstall =
+    status === GameStatus.StatusMissing ||
+    status === GameStatus.StatusCancelled ||
+    status === GameStatus.StatusError;
+  const canLaunch =
+    status === GameStatus.StatusReady ||
+    status === GameStatus.StatusChecking ||
+    status === GameStatus.StatusUpdateAvailable;
+  const showProgress =
+    installing || status === GameStatus.StatusChecking || status === GameStatus.StatusUpdating;
   const openGameRepository = () => runAction(() => LauncherService.OpenGameRepository());
 
   return (
@@ -165,11 +166,19 @@ function LauncherDashboard() {
           <p className="lead">{gameState.message || statusDescription(status)}</p>
 
           {installed ? (
-            status !== GameStatus.StatusChecking ? <VersionSummary state={gameState} /> : null
+            status !== GameStatus.StatusChecking ? (
+              <VersionSummary state={gameState} />
+            ) : null
           ) : !installing ? (
             <div className="requirements" aria-label="下載需求">
-              <div><strong>約 500–800 MB</strong><span>網路下載</span></div>
-              <div><strong>至少 1 GB</strong><span>可用磁碟空間</span></div>
+              <div>
+                <strong>約 500–800 MB</strong>
+                <span>網路下載</span>
+              </div>
+              <div>
+                <strong>至少 1 GB</strong>
+                <span>可用磁碟空間</span>
+              </div>
             </div>
           ) : null}
 
@@ -233,7 +242,6 @@ function LauncherDashboard() {
           </div>
         </>
       )}
-
     </StatusShell>
   );
 }
@@ -249,7 +257,9 @@ function LauncherHeader({
 }) {
   return (
     <header className="launcher-header">
-      <div className="brand-mark" aria-hidden="true">IL</div>
+      <div className="brand-mark" aria-hidden="true">
+        IL
+      </div>
       <div>
         <p className="eyebrow">IDLE LINEAGE LAUNCHER</p>
         <h1>{title}</h1>
@@ -260,9 +270,11 @@ function LauncherHeader({
           className="status-badge"
           type="button"
           disabled={!launcherInfo?.gameRepository}
-          aria-label={launcherInfo?.gameRepository
-            ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
-            : '正在讀取遊戲 repository'}
+          aria-label={
+            launcherInfo?.gameRepository
+              ? `在 GitHub 開啟 ${launcherInfo.gameRepository}`
+              : '正在讀取遊戲 repository'
+          }
           onClick={onOpenGameRepository}
         >
           {launcherInfo?.gameRepository || '—'}
@@ -333,9 +345,7 @@ function LauncherFooter({
   onOpenLauncherRepository: () => void;
 }) {
   const updateTooltipID = 'launcher-update-tooltip';
-  const updateMessage = latestVersion
-    ? `有更新版本 v${latestVersion} 可供下載`
-    : '';
+  const updateMessage = latestVersion ? `有更新版本 v${latestVersion} 可供下載` : '';
 
   return (
     <>
@@ -347,9 +357,11 @@ function LauncherFooter({
         <button
           className="github-button"
           type="button"
-          aria-label={updateMessage
-            ? `在 GitHub 開啟 Idle Lineage Launcher；${updateMessage}`
-            : '在 GitHub 開啟 Idle Lineage Launcher'}
+          aria-label={
+            updateMessage
+              ? `在 GitHub 開啟 Idle Lineage Launcher；${updateMessage}`
+              : '在 GitHub 開啟 Idle Lineage Launcher'
+          }
           data-tooltip-id={latestVersion ? updateTooltipID : undefined}
           data-tooltip-content={latestVersion ? updateMessage : undefined}
           onClick={onOpenLauncherRepository}
@@ -414,7 +426,11 @@ function UpdateAction({
         </button>
       );
     case GameStatus.StatusChecking:
-      return <button className="secondary-button" type="button" disabled>正在檢查更新</button>;
+      return (
+        <button className="secondary-button" type="button" disabled>
+          正在檢查更新
+        </button>
+      );
     case GameStatus.StatusUpdateAvailable:
       return (
         <button
@@ -426,7 +442,11 @@ function UpdateAction({
         </button>
       );
     case GameStatus.StatusUpdating:
-      return <button className="secondary-button" type="button" disabled>正在更新遊戲</button>;
+      return (
+        <button className="secondary-button" type="button" disabled>
+          正在更新遊戲
+        </button>
+      );
     default:
       return null;
   }
@@ -462,7 +482,11 @@ function OperationProgress({ state }: { state: GameState }) {
 }
 
 function InlineError({ message }: { message: string }) {
-  return <p className="inline-error" role="alert">{message}</p>;
+  return (
+    <p className="inline-error" role="alert">
+      {message}
+    </p>
+  );
 }
 
 function LoadingMark() {
@@ -537,7 +561,9 @@ function formatVersion(commit: string, commitTime: string, fallback: string) {
   return (
     <>
       {shortCommit(commit, fallback)}
-      <span className="version-separator" aria-hidden="true">·</span>
+      <span className="version-separator" aria-hidden="true">
+        ·
+      </span>
       <span className="version-time">{formattedTime}</span>
     </>
   );
@@ -563,10 +589,12 @@ function readError(error: unknown) {
 }
 
 function isInstalledState(status: GameStatus) {
-  return status === GameStatus.StatusReady
-    || status === GameStatus.StatusChecking
-    || status === GameStatus.StatusUpdateAvailable
-    || status === GameStatus.StatusUpdating;
+  return (
+    status === GameStatus.StatusReady ||
+    status === GameStatus.StatusChecking ||
+    status === GameStatus.StatusUpdateAvailable ||
+    status === GameStatus.StatusUpdating
+  );
 }
 
 export default App;

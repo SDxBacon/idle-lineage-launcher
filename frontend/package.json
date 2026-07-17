@@ -7,6 +7,8 @@
     "dev": "vite",
     "build:dev": "tsc && vite build --minify false --mode development",
     "build": "tsc && vite build --mode production",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -35,6 +37,7 @@
     "@vitejs/plugin-react": "^6.0.0",
     "create-dmg": "8.1.0",
     "jsdom": "^26.1.0",
+    "prettier": "^3.9.5",
     "tailwindcss": "^4.3.2",
     "typescript": "^5.2.2",
     "vite": "^8.0.5",

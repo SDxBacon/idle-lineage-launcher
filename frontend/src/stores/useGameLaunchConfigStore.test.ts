@@ -25,20 +25,26 @@ describe('useGameLaunchConfigStore', () => {
     useGameLaunchConfigStore.getState().setBrowserID('');
     expect(useGameLaunchConfigStore.getState().browserID).toBeNull();
 
-    localStorage.setItem(GAME_LAUNCH_CONFIG_STORAGE_KEY, JSON.stringify({
-      state: { browserID: 42 },
-      version: 1,
-    }));
+    localStorage.setItem(
+      GAME_LAUNCH_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        state: { browserID: 42 },
+        version: 1,
+      }),
+    );
     await useGameLaunchConfigStore.persist.rehydrate();
 
     expect(useGameLaunchConfigStore.getState().browserID).toBeNull();
   });
 
   it('rehydrates a valid browser ID', async () => {
-    localStorage.setItem(GAME_LAUNCH_CONFIG_STORAGE_KEY, JSON.stringify({
-      state: { browserID: 'windows:ChromeHTML' },
-      version: 1,
-    }));
+    localStorage.setItem(
+      GAME_LAUNCH_CONFIG_STORAGE_KEY,
+      JSON.stringify({
+        state: { browserID: 'windows:ChromeHTML' },
+        version: 1,
+      }),
+    );
     await useGameLaunchConfigStore.persist.rehydrate();
 
     expect(useGameLaunchConfigStore.getState().browserID).toBe('windows:ChromeHTML');

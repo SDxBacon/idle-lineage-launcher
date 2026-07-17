@@ -28,11 +28,13 @@ function getGameBrowsersOnce() {
   }
 
   gameBrowsersInFlight = request;
-  void request.finally(() => {
-    if (gameBrowsersInFlight === request) {
-      gameBrowsersInFlight = null;
-    }
-  }).catch(() => undefined);
+  void request
+    .finally(() => {
+      if (gameBrowsersInFlight === request) {
+        gameBrowsersInFlight = null;
+      }
+    })
+    .catch(() => undefined);
 
   return request;
 }
@@ -54,10 +56,7 @@ export function useGameBrowsers(): GameBrowserOptions {
         setOptions({ browsers, loadState: 'ready' });
 
         const { browserID, setBrowserID } = useGameLaunchConfigStore.getState();
-        if (
-          browserID !== null
-          && !browsers.some(browser => browser.id === browserID)
-        ) {
+        if (browserID !== null && !browsers.some(browser => browser.id === browserID)) {
           setBrowserID(null);
         }
       })

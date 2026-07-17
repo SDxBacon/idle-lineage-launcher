@@ -25,9 +25,7 @@ export function GameLaunchSelect({ browsers, loadState }: GameLaunchSelectProps)
   const browserID = useGameLaunchConfigStore(state => state.browserID);
   const setBrowserID = useGameLaunchConfigStore(state => state.setBrowserID);
 
-  const selectedValue = browserID === null
-    ? SYSTEM_DEFAULT_VALUE
-    : browserValue(browserID);
+  const selectedValue = browserID === null ? SYSTEM_DEFAULT_VALUE : browserValue(browserID);
   const disabled = loadState !== 'ready';
 
   const handleValueChange = (value: string) => {
@@ -48,11 +46,7 @@ export function GameLaunchSelect({ browsers, loadState }: GameLaunchSelectProps)
         </label>
         <p id="game-launch-browser-description">遊戲存檔會依瀏覽器分開保存。</p>
       </div>
-      <Select
-        value={selectedValue}
-        onValueChange={handleValueChange}
-        disabled={disabled}
-      >
+      <Select value={selectedValue} onValueChange={handleValueChange} disabled={disabled}>
         <SelectTrigger
           id="game-launch-browser"
           className="game-launch-select-trigger"

@@ -69,21 +69,25 @@ describe('fetchNewerLauncherVersion', () => {
   ])('silently ignores %s', async (_label, response) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response));
 
-    await expect(fetchNewerLauncherVersion('1.3.9', new AbortController().signal))
-      .resolves.toBeNull();
+    await expect(
+      fetchNewerLauncherVersion('1.3.9', new AbortController().signal),
+    ).resolves.toBeNull();
   });
 
   it('silently ignores invalid JSON and network failures', async () => {
     const invalidJSON = responseWith({ tag_name: 'v1.4.0' });
     vi.mocked(invalidJSON.json).mockRejectedValueOnce(new SyntaxError('invalid JSON'));
-    const fetchMock = vi.fn()
+    const fetchMock = vi
+      .fn()
       .mockResolvedValueOnce(invalidJSON)
       .mockRejectedValueOnce(new TypeError('network failure'));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(fetchNewerLauncherVersion('1.3.9', new AbortController().signal))
-      .resolves.toBeNull();
-    await expect(fetchNewerLauncherVersion('1.3.9', new AbortController().signal))
-      .resolves.toBeNull();
+    await expect(
+      fetchNewerLauncherVersion('1.3.9', new AbortController().signal),
+    ).resolves.toBeNull();
+    await expect(
+      fetchNewerLauncherVersion('1.3.9', new AbortController().signal),
+    ).resolves.toBeNull();
   });
 });

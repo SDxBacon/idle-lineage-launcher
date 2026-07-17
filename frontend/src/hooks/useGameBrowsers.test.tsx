@@ -55,9 +55,11 @@ describe('useGameBrowsers', () => {
 
   it('uses the store value at response time instead of a mount-time snapshot', async () => {
     let resolveBrowsers!: (browsers: { id: string; name: string }[]) => void;
-    mocks.getGameBrowsers.mockReturnValue(new Promise(resolve => {
-      resolveBrowsers = resolve;
-    }));
+    mocks.getGameBrowsers.mockReturnValue(
+      new Promise(resolve => {
+        resolveBrowsers = resolve;
+      }),
+    );
     useGameLaunchConfigStore.getState().setBrowserID('browser:old');
 
     const { result } = renderHook(() => useGameBrowsers());
@@ -78,16 +80,16 @@ describe('useGameBrowsers', () => {
 
     await waitFor(() => expect(result.current.loadState).toBe('error'));
     expect(result.current.browsers).toEqual([]);
-    expect(useGameLaunchConfigStore.getState().browserID).toBe(
-      'browser:temporarily-unavailable',
-    );
+    expect(useGameLaunchConfigStore.getState().browserID).toBe('browser:temporarily-unavailable');
   });
 
   it('deduplicates the StrictMode mount request while it is in flight', async () => {
     let resolveBrowsers!: (browsers: []) => void;
-    mocks.getGameBrowsers.mockReturnValue(new Promise(resolve => {
-      resolveBrowsers = resolve;
-    }));
+    mocks.getGameBrowsers.mockReturnValue(
+      new Promise(resolve => {
+        resolveBrowsers = resolve;
+      }),
+    );
 
     const { result } = renderHook(() => useGameBrowsers(), {
       wrapper: StrictMode,
