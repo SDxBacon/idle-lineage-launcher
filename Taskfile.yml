@@ -46,6 +46,44 @@ tasks:
         vars:
           VERSION: "{{.VERSION}}"
 
+  release:auto:
+    summary: Builds release assets and creates a GitHub draft release with an automatic tag
+    platforms: [darwin]
+    preconditions:
+      - sh: command -v gh >/dev/null 2>&1
+        msg: "GitHub CLI is required. Install it from https://cli.github.com/"
+      - sh: gh auth status >/dev/null 2>&1
+        msg: "GitHub CLI is not authenticated. Run: gh auth login -h github.com"
+      - sh: test -z "$(git status --porcelain)"
+        msg: "The working tree must be clean before creating a release."
+      - sh: test "$(git branch --show-current)" = "main"
+        msg: "release:auto must run from the main branch."
+      - sh: test "$(git rev-parse HEAD)" = "$(gh api repos/$(gh repo view --json nameWithOwner --jq .nameWithOwner)/commits/main --jq .sha)"
+        msg: "Local main must match the remote main branch before creating a release. Push or pull the pending commits first."
+    cmds:
+      - task: release
+        vars:
+          VERSION: "{{.VERSION}}"
+      - |
+        set -euo pipefail
+
+        tag="v{{.VERSION}}"
+        repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+
+        if gh api "repos/${repo}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+          echo "Release tag ${tag} already exists. Choose a new VERSION." >&2
+          exit 1
+        fi
+
+        gh release create "${tag}" \
+          "release/{{.VERSION}}/{{.APP_NAME}}-macos-arm64.dmg" \
+          "release/{{.VERSION}}/{{.APP_NAME}}-macos-amd64.dmg" \
+          "release/{{.VERSION}}/{{.APP_NAME}}-windows-amd64.exe" \
+          --draft \
+          --generate-notes \
+          --title "${tag}" \
+          --target "$(git rev-parse HEAD)"
+
   release:macos:
     summary: Builds ad-hoc signed arm64 and amd64 DMGs
     platforms: [darwin]

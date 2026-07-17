@@ -88,6 +88,9 @@ task release
 # Or build one platform only:
 task release:macos
 task release:windows
+
+# Build all release assets, create the v0.2.0 tag, and open a GitHub draft release:
+task release:auto VERSION=0.2.0
 ```
 
 The combined `task release` command must run on macOS. It creates separate
@@ -95,6 +98,12 @@ arm64 and amd64 DMGs containing the app and an Applications shortcut, followed
 by one cross-compiled Windows amd64 portable executable. Outputs are written to
 `release/0.1.0/` and no game content is included. Override the output version
 with, for example, `task release VERSION=0.2.0`.
+
+`task release:auto` additionally requires an authenticated GitHub CLI (`gh auth
+login -h github.com`), a clean `main` working tree, and a local commit matching
+the remote `main` branch. It creates the version tag automatically, uploads all
+three artifacts to a draft GitHub release, and generates release notes. Publish
+the draft manually after reviewing its files and notes.
 
 ## Runtime data
 
