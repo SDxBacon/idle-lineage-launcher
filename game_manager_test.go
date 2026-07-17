@@ -44,6 +44,139 @@ func TestExistingGitVersionStartsReadyWithoutNetwork(t *testing.T) {
 	if !ready || root != paths.Source || activeCommit != commit {
 		t.Fatalf("unexpected active version: %q %q %v", root, activeCommit, ready)
 	}
+	assertManagedGameExclude(t, paths.Source)
+}
+
+func TestEnsureGitInfoExcludePreservesExistingRulesAndIsIdempotent(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing *string
+		want     string
+	}{
+		{name: "missing", want: ".DS_Store\n"},
+		{name: "empty", existing: stringPointer(""), want: ".DS_Store\n"},
+		{name: "existing LF", existing: stringPointer("ignored.cache\n"), want: "ignored.cache\n.DS_Store\n"},
+		{name: "existing CRLF", existing: stringPointer("ignored.cache\r\n"), want: "ignored.cache\r\n.DS_Store\n"},
+		{name: "missing final newline", existing: stringPointer("ignored.cache"), want: "ignored.cache\n.DS_Store\n"},
+		{name: "exact LF", existing: stringPointer("ignored.cache\n.DS_Store\n"), want: "ignored.cache\n.DS_Store\n"},
+		{name: "exact CRLF", existing: stringPointer("ignored.cache\r\n.DS_Store\r\n"), want: "ignored.cache\r\n.DS_Store\r\n"},
+		{name: "exact at EOF", existing: stringPointer("ignored.cache\n.DS_Store"), want: "ignored.cache\n.DS_Store"},
+		{
+			name:     "similar patterns do not count",
+			existing: stringPointer("# .DS_Store\n!.DS_Store\n/.DS_Store\n.DS_Store.backup\n"),
+			want:     "# .DS_Store\n!.DS_Store\n/.DS_Store\n.DS_Store.backup\n.DS_Store\n",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if test.existing != nil {
+				writeTestFile(t, root, ".git/info/exclude", *test.existing)
+			}
+			if err := ensureGitInfoExclude(root); err != nil {
+				t.Fatal(err)
+			}
+			contents, err := os.ReadFile(filepath.Join(root, ".git", "info", "exclude"))
+			if err != nil || string(contents) != test.want {
+				t.Fatalf("exclude = %q, want %q (%v)", contents, test.want, err)
+			}
+			if err := ensureGitInfoExclude(root); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(filepath.Join(root, ".git", "info", "exclude"))
+			if err != nil || !bytes.Equal(after, contents) {
+				t.Fatalf("idempotent ensure changed exclude: before=%q after=%q (%v)", contents, after, err)
+			}
+			if _, err := os.Lstat(filepath.Join(root, ".gitignore")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("ensure created a working-tree .gitignore: %v", err)
+			}
+		})
+	}
+}
+
+func TestEnsureGitInfoExcludeRejectsSymlinks(t *testing.T) {
+	t.Run("info directory", func(t *testing.T) {
+		root := t.TempDir()
+		outside := t.TempDir()
+		if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, ".git", "info")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := ensureGitInfoExclude(root); err == nil {
+			t.Fatal("symlinked Git info directory was accepted")
+		}
+		if _, err := os.Lstat(filepath.Join(outside, "exclude")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("exclude was written outside the repository: %v", err)
+		}
+	})
+
+	t.Run("exclude file", func(t *testing.T) {
+		root := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "outside-exclude")
+		writeTestFile(t, root, ".git/info/placeholder", "")
+		if err := os.WriteFile(outside, []byte("keep\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(root, ".git", "info", "exclude")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := ensureGitInfoExclude(root); err == nil {
+			t.Fatal("symlinked Git info exclude was accepted")
+		}
+		contents, err := os.ReadFile(outside)
+		if err != nil || string(contents) != "keep\n" {
+			t.Fatalf("outside exclude was changed: %q (%v)", contents, err)
+		}
+	})
+}
+
+func TestManagedGitInfoExcludeIgnoresFinderMetadataAtAnyDepth(t *testing.T) {
+	repository := newLocalGameRepository(t, filepath.Join(t.TempDir(), "game"))
+	if err := ensureGitInfoExclude(repository.path); err != nil {
+		t.Fatal(err)
+	}
+	configureManagedGameWorktree(repository.worktree)
+	for _, relative := range []string{".DS_Store", "assets/.DS_Store"} {
+		writeTestFile(t, repository.path, relative, "finder")
+	}
+	writeTestFile(t, repository.path, ".DS_Store.backup", "not Finder metadata")
+	status, err := repository.worktree.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{".DS_Store", "assets/.DS_Store"} {
+		if _, exists := status[relative]; exists {
+			t.Fatalf("managed exclude did not ignore %q: %v", relative, status)
+		}
+	}
+	if !status.IsUntracked(".DS_Store.backup") {
+		t.Fatalf("managed exclude ignored a similar filename: %v", status)
+	}
+}
+
+func TestExistingInstallIgnoresGitInfoExcludeWriteFailure(t *testing.T) {
+	paths := makeDataPaths(t.TempDir())
+	repository := newLocalGameRepository(t, paths.Source)
+	infoPath := filepath.Join(paths.Source, ".git", "info")
+	if err := os.RemoveAll(infoPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(infoPath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	manager, err := newGameManager(paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state := manager.State(); state.Status != StatusReady || state.Commit != repository.head(t) {
+		t.Fatalf("exclude failure made existing install unavailable: %+v", state)
+	}
 }
 
 func TestDataPathsUseShines871Source(t *testing.T) {
@@ -275,6 +408,7 @@ func TestCloneInstallsShallowGitWorkingTree(t *testing.T) {
 	if err != nil || len(shallow) == 0 {
 		t.Fatalf("clone is not shallow: %v (%v)", shallow, err)
 	}
+	assertManagedGameExclude(t, manager.paths.Source)
 	mu.Lock()
 	if !containsStatus(events, StatusInstalling) || !containsStatus(events, StatusReady) {
 		mu.Unlock()
@@ -490,7 +624,13 @@ func TestDevelopmentInstallFetchesOnlyPinnedCommitThenFindsUpdate(t *testing.T) 
 	}
 	remote.commitFile(t, "css/app.css", "body{color:white}", "first update")
 	latestCommit := remote.commitFile(t, "js/app.js", "console.log('latest')", "second update")
-	manager := testManager(t, remote.path, nil)
+	var eventMu sync.Mutex
+	var events []GameState
+	manager := testManager(t, remote.path, func(state GameState) {
+		eventMu.Lock()
+		events = append(events, state)
+		eventMu.Unlock()
+	})
 	manager.initialCommit = pinnedCommit
 	var fetches initialFetchRecorder
 	manager.initialFetch = func(ctx context.Context, repository *git.Repository, options *git.FetchOptions) error {
@@ -523,6 +663,11 @@ func TestDevelopmentInstallFetchesOnlyPinnedCommitThenFindsUpdate(t *testing.T) 
 		t.Fatal("development install downloaded the latest main commit before update check")
 	}
 	assertDevelopmentRepositoryMetadata(t, installed, pinnedCommit)
+	assertManagedGameExclude(t, manager.paths.Source)
+	writeTestFile(t, manager.paths.Source, ".DS_Store", "finder")
+	eventMu.Lock()
+	events = nil
+	eventMu.Unlock()
 
 	if err := manager.StartCheckForUpdate(); err != nil {
 		t.Fatal(err)
@@ -531,12 +676,21 @@ func TestDevelopmentInstallFetchesOnlyPinnedCommitThenFindsUpdate(t *testing.T) 
 	if manager.State().RemoteCommit != latestCommit {
 		t.Fatalf("fetch did not find latest main: %+v", manager.State())
 	}
+	if contents, err := os.ReadFile(filepath.Join(manager.paths.Source, ".DS_Store")); err != nil || string(contents) != "finder" {
+		t.Fatalf("update check changed Finder metadata: %q (%v)", contents, err)
+	}
 	if err := manager.StartUpdate(); err != nil {
 		t.Fatal(err)
 	}
 	waitForStatus(t, manager, StatusReady)
-	if manager.State().Commit != latestCommit {
-		t.Fatalf("pull did not reach latest main: %+v", manager.State())
+	state := manager.State()
+	if state.Commit != latestCommit || state.Message != "更新完成；請重新整理或重新開啟瀏覽器頁面" {
+		t.Fatalf("in-place development update did not reach latest main: %+v", state)
+	}
+	eventMu.Lock()
+	defer eventMu.Unlock()
+	if containsProgressPhase(events, "重新下載") {
+		t.Fatalf("Finder metadata triggered a rebuild: %+v", events)
 	}
 }
 
@@ -1082,6 +1236,224 @@ func TestForceUpdateOverwritesDirtyTreeAndRemovesAllNonOfficialFiles(t *testing.
 	if err != nil || head.Hash().String() != remote.head(t) || head.Name() != gameBranchReference {
 		t.Fatalf("updated HEAD was not normalized to official main: %v (%v)", head, err)
 	}
+	assertManagedGameExclude(t, manager.paths.Source)
+}
+
+func TestSynchronizedGameTreeAllowsFinderMetadataRecreatedAfterCleanup(t *testing.T) {
+	repository := newLocalGameRepository(t, filepath.Join(t.TempDir(), "game"))
+	manifest := gameManifestAtHead(t, repository)
+	if err := cleanGameTreeToManifest(repository.path, manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{".DS_Store", "assets/.DS_Store"} {
+		writeTestFile(t, repository.path, relative, "finder")
+	}
+	status, err := repository.worktree.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{".DS_Store", "assets/.DS_Store"} {
+		if !status.IsUntracked(relative) {
+			t.Fatalf("fixture did not expose %q as untracked: %v", relative, status)
+		}
+	}
+	if err := validateSynchronizedGameTree(repository.repository, repository.worktree, repository.path, manifest); err != nil {
+		t.Fatalf("recreated Finder metadata failed final verification: %v", err)
+	}
+	for _, relative := range []string{".DS_Store", "assets/.DS_Store"} {
+		contents, err := os.ReadFile(filepath.Join(repository.path, filepath.FromSlash(relative)))
+		if err != nil || string(contents) != "finder" {
+			t.Fatalf("allowed Finder metadata %q was changed: %q (%v)", relative, contents, err)
+		}
+	}
+}
+
+func TestForceSynchronizeGameTreeLeavesFinderMetadataWhenCleanupCannotRemoveIt(t *testing.T) {
+	repository := newLocalGameRepository(t, filepath.Join(t.TempDir(), "game"))
+	manifest := gameManifestAtHead(t, repository)
+	writeTestFile(t, repository.path, "js/app.js", "local change")
+	writeTestFile(t, repository.path, finderMetadata, "finder")
+	removeAttempts := 0
+	removePath := func(absolute string) error {
+		if filepath.Base(absolute) == finderMetadata {
+			removeAttempts++
+			return os.ErrPermission
+		}
+		return os.RemoveAll(absolute)
+	}
+
+	if err := forceSynchronizeGameTreeWithRemover(
+		repository.repository,
+		repository.worktree,
+		repository.path,
+		plumbing.NewHash(repository.head(t)),
+		manifest,
+		removePath,
+	); err != nil {
+		t.Fatalf("Finder metadata removal failure caused synchronization failure: %v", err)
+	}
+	if removeAttempts != 2 {
+		t.Fatalf("Finder metadata cleanup attempts = %d, want 2", removeAttempts)
+	}
+	contents, err := os.ReadFile(filepath.Join(repository.path, finderMetadata))
+	if err != nil || string(contents) != "finder" {
+		t.Fatalf("hard reset changed Finder metadata after cleanup failure: %q (%v)", contents, err)
+	}
+	tracked, err := os.ReadFile(filepath.Join(repository.path, "js", "app.js"))
+	if err != nil || string(tracked) != "console.log('ready')" {
+		t.Fatalf("hard reset did not restore official file: %q (%v)", tracked, err)
+	}
+}
+
+func TestForceSynchronizeGameTreeRestoresSkipWorktreeTrackedFinderMetadata(t *testing.T) {
+	repository := newLocalGameRepository(t, filepath.Join(t.TempDir(), "game"))
+	officialCommit := repository.commitFile(t, finderMetadata, "official", "track Finder metadata")
+	manifest := gameManifestAtHead(t, repository)
+	index, err := repository.repository.Storer.Index()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := index.Entry(finderMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.SkipWorktree = true
+	if err := repository.repository.Storer.SetIndex(index); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, repository.path, finderMetadata, "modified")
+
+	if err := forceSynchronizeGameTree(
+		repository.repository,
+		repository.worktree,
+		repository.path,
+		plumbing.NewHash(officialCommit),
+		manifest,
+	); err != nil {
+		t.Fatalf("skip-worktree tracked Finder metadata failed synchronization: %v", err)
+	}
+	contents, err := os.ReadFile(filepath.Join(repository.path, finderMetadata))
+	if err != nil || string(contents) != "official" {
+		t.Fatalf("tracked Finder metadata was not restored: %q (%v)", contents, err)
+	}
+	index, err = repository.repository.Storer.Index()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err = index.Entry(finderMetadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.SkipWorktree {
+		t.Fatal("synchronized index retained skip-worktree")
+	}
+}
+
+func TestWalkManagedGameTreeAllowsEntriesToDisappearAfterDirectoryRead(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "a", "first")
+	writeTestFile(t, root, "b", "second")
+	err := walkManagedGameTree(root, "", func(relative, _ string, _ os.FileInfo) (bool, error) {
+		if relative == "a" {
+			if err := os.Remove(filepath.Join(root, "b")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return false, nil
+	})
+	if err != nil {
+		t.Fatalf("disappearing directory entry failed the walk: %v", err)
+	}
+}
+
+func TestSynchronizedGameTreeRejectsNonFinderMetadataExceptions(t *testing.T) {
+	tests := []struct {
+		name             string
+		configureExclude bool
+		prepareOfficial  func(*testing.T, *localGameRepository)
+		mutate           func(*testing.T, *localGameRepository)
+	}{
+		{
+			name:             "similar filename",
+			configureExclude: true,
+			mutate: func(t *testing.T, repository *localGameRepository) {
+				writeTestFile(t, repository.path, ".DS_Store.backup", "local")
+			},
+		},
+		{
+			name:             "directory",
+			configureExclude: true,
+			mutate: func(t *testing.T, repository *localGameRepository) {
+				if err := os.Mkdir(filepath.Join(repository.path, ".DS_Store"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:             "symlink",
+			configureExclude: true,
+			mutate: func(t *testing.T, repository *localGameRepository) {
+				if err := os.Symlink("index.html", filepath.Join(repository.path, ".DS_Store")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			},
+		},
+		{
+			name: "staged untracked file",
+			mutate: func(t *testing.T, repository *localGameRepository) {
+				writeTestFile(t, repository.path, ".DS_Store", "staged")
+				if _, err := repository.worktree.Add(".DS_Store"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:             "tracked file modified locally",
+			configureExclude: true,
+			prepareOfficial: func(t *testing.T, repository *localGameRepository) {
+				repository.commitFile(t, ".DS_Store", "official", "track Finder metadata")
+			},
+			mutate: func(t *testing.T, repository *localGameRepository) {
+				writeTestFile(t, repository.path, ".DS_Store", "modified")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := newLocalGameRepository(t, filepath.Join(t.TempDir(), "game"))
+			if test.prepareOfficial != nil {
+				test.prepareOfficial(t, repository)
+			}
+			manifest := gameManifestAtHead(t, repository)
+			if test.configureExclude {
+				if err := ensureGitInfoExclude(repository.path); err != nil {
+					t.Fatal(err)
+				}
+				configureManagedGameWorktree(repository.worktree)
+			}
+			test.mutate(t, repository)
+			if err := validateSynchronizedGameTree(repository.repository, repository.worktree, repository.path, manifest); err == nil {
+				t.Fatal("non-Finder metadata exception passed final verification")
+			}
+		})
+	}
+}
+
+func TestSynchronizedGameTreeRejectsTrackedFinderMetadataMissingFromManifest(t *testing.T) {
+	repository := newLocalGameRepository(t, filepath.Join(t.TempDir(), "game"))
+	officialManifest := gameManifestAtHead(t, repository)
+	repository.commitFile(t, finderMetadata, "tracked", "track Finder metadata")
+	if err := ensureGitInfoExclude(repository.path); err != nil {
+		t.Fatal(err)
+	}
+	configureManagedGameWorktree(repository.worktree)
+	status, err := repository.worktree.Status()
+	if err != nil || !status.IsClean() {
+		t.Fatalf("tracked Finder metadata fixture is not clean: %v (%v)", status, err)
+	}
+	if err := validateSynchronizedGameTree(repository.repository, repository.worktree, repository.path, officialManifest); err == nil {
+		t.Fatal("tracked Finder metadata absent from the official manifest passed verification")
+	}
 }
 
 func TestUpdateRebuildsLatestVersionWhenIndexIsCorrupt(t *testing.T) {
@@ -1120,6 +1492,7 @@ func TestUpdateRebuildsLatestVersionWhenIndexIsCorrupt(t *testing.T) {
 	if err != nil || !status.IsClean() {
 		t.Fatalf("rebuilt repository is not clean: %v (%v)", status, err)
 	}
+	assertManagedGameExclude(t, manager.paths.Source)
 }
 
 func TestInstallReplacesInvalidShines871SourceOnRetry(t *testing.T) {
@@ -1555,6 +1928,44 @@ func writeTestFile(t *testing.T, root, relative, contents string) {
 	}
 }
 
+func stringPointer(value string) *string {
+	return &value
+}
+
+func assertManagedGameExclude(t *testing.T, root string) {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(root, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, line := range strings.Split(string(contents), "\n") {
+		if strings.TrimSuffix(line, "\r") == finderMetadata {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("managed Finder exclude count = %d, want 1; contents=%q", count, contents)
+	}
+}
+
+func gameManifestAtHead(t *testing.T, repository *localGameRepository) map[string]gameTreePathKind {
+	t.Helper()
+	head, err := repository.repository.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit, err := repository.repository.CommitObject(head.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := gameCommitManifest(commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
 func waitForStatus(t *testing.T, manager *gameManager, status GameStatus) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -1593,6 +2004,15 @@ func assertDirectoryEmpty(t *testing.T, directory string) {
 func containsStatus(states []GameState, status GameStatus) bool {
 	for _, state := range states {
 		if state.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func containsProgressPhase(states []GameState, phase string) bool {
+	for _, state := range states {
+		if state.ProgressPhase == phase {
 			return true
 		}
 	}

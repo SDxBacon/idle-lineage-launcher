@@ -19,15 +19,23 @@ HEAD hashes. Local commits, rewritten remote history, shallow history, detached
 HEAD, and working-tree changes do not block this comparison.
 
 Updates run only when requested by the user. The launcher fetches `main` again,
-hard-resets the managed branch and working tree to that exact commit, and
-removes every tracked, untracked, and ignored path that is not part of the
-official tree. The game directory is therefore a launcher-managed cache, not a
-place for user files. If its Git metadata is unusable, startup reports an error
+hard-resets the managed branch and working tree to that exact commit, discards
+all tracked changes, and removes untracked and ignored paths that are not part
+of the official tree. Cleanup still attempts to remove Finder metadata, but an
+untracked regular file named exactly `.DS_Store` is tolerated at any depth if
+Finder recreates it. All other non-official paths are removed, so the game
+directory remains a launcher-managed cache, not a place for user files.
+
+For each runtime repository, the launcher best-effort maintains `.DS_Store` in
+the local `.git/info/exclude`. This rule is never committed or pushed and does
+not modify the upstream `.gitignore`; the launcher applies the same exception
+during its own validation. If Git metadata is unusable, startup reports an error
 and offers the existing retry-download flow; it never turns a check into an
 update. Only after the user explicitly requests an update may synchronization
 fall back to downloading the latest official version into staging and swapping
-it in after validation. Network failures occur before local files are changed;
-other storage or permission failures are reported with a retryable message.
+it in after validation. Network failures occur before working-tree game content
+is changed; other storage or permission failures are reported with a retryable
+message.
 
 Git `HEAD` remains the installed-version source of truth, so no separate
 active-version manifest is written. Transfers publish localized progress plus
@@ -53,7 +61,7 @@ wails3 dev
 
 Development builds fetch
 `7e30bc454196683129b8a883a2a1e6011f35bcc6` directly by exact SHA for the first
-install, making the normal fetch/pull update flow easy to test without first
+install, making the normal fetch/reset update flow easy to test without first
 downloading the current `main` tip. If the Git server does not support exact-SHA
 fetches, the installer falls back to fetching the full `main` history.
 Production builds continue to shallow-clone the `main` tip.
@@ -91,8 +99,9 @@ are written to `release/0.1.0/` and no game content is included.
 The relevant subdirectories are:
 
 - `game/shines871/`: the launcher-managed active Git working tree; the entry
-  point is `game/shines871/index.html`. Updates delete non-official files from
-  this directory.
+  point is `game/shines871/index.html`. Updates discard local changes and delete
+  non-official files except untracked regular `.DS_Store` Finder metadata. Do
+  not store user files here.
 - `game/staging/`: temporary clone data used while installing.
 - `webview/`: the launcher UI's Windows WebView2 profile. The externally opened
   game does not use this profile.
@@ -102,9 +111,9 @@ installation. It is left untouched, and the launcher offers a new download into
 `game/shines871`.
 
 The game runs from a local `file://` URL in the selected browser. An already
-open game tab is not automatically reloaded after a pull; refresh it or launch
-the game again to use the updated files. Saves belong to that browser's local
-file storage and profile. Another browser or browser profile may therefore not
-see the same save, and clearing that browser's site/local data may remove it.
+open game tab is not automatically reloaded after an update; refresh it or
+launch the game again to use the updated files. Saves belong to that browser's
+local file storage and profile. Another browser or browser profile may therefore
+not see the same save, and clearing that browser's site/local data may remove it.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party notices.

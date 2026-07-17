@@ -5,10 +5,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +19,8 @@ import (
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+	gitindex "github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -23,6 +28,7 @@ const (
 	gameRepository    = "shines871/idle-lineage-class"
 	gameRepositoryURL = "https://github.com/" + gameRepository + ".git"
 	gameBranch        = "main"
+	finderMetadata    = ".DS_Store"
 )
 
 var (
@@ -159,6 +165,7 @@ func (m *gameManager) initialise() error {
 	repository, err := git.PlainOpen(m.paths.Source)
 	if err == nil {
 		m.logger.Info("found installed Git working tree", "source", m.paths.Source)
+		m.ensureManagedGameExclude(m.paths.Source)
 		if err := validateGameRoot(m.paths.Source); err != nil {
 			return fmt.Errorf("validate installed game: %w", err)
 		}
@@ -535,6 +542,7 @@ func (m *gameManager) cloneVersionAndActivate(ctx context.Context, forceLatest b
 			return err
 		}
 	}
+	m.ensureManagedGameExclude(staging)
 	progress.Stage("驗證檔案", "正在驗證遊戲檔案…")
 	if err := validateGameRoot(staging); err != nil {
 		return fmt.Errorf("validate cloned game: %w", err)
@@ -718,6 +726,7 @@ func (m *gameManager) update(ctx context.Context) error {
 	if err != nil {
 		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("open game repository: %w", err))
 	}
+	m.ensureManagedGameExclude(m.paths.Source)
 	remote, remoteObject, err := m.fetchOfficialMain(ctx, repository, "sync", "正在下載官方最新版本…")
 	if err != nil {
 		if isRepositoryStateError(err) {
@@ -733,6 +742,7 @@ func (m *gameManager) update(ctx context.Context) error {
 	if err != nil {
 		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("open game working tree: %w", err))
 	}
+	configureManagedGameWorktree(worktree)
 	if _, err := repository.Storer.Index(); err != nil {
 		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("read game index: %w", err))
 	}
@@ -805,7 +815,11 @@ func gameCommitManifest(commit *object.Commit) (map[string]gameTreePathKind, err
 }
 
 func forceSynchronizeGameTree(repository *git.Repository, worktree *git.Worktree, root string, target plumbing.Hash, manifest map[string]gameTreePathKind) error {
-	if err := cleanGameTreeToManifest(root, manifest); err != nil {
+	return forceSynchronizeGameTreeWithRemover(repository, worktree, root, target, manifest, os.RemoveAll)
+}
+
+func forceSynchronizeGameTreeWithRemover(repository *git.Repository, worktree *git.Worktree, root string, target plumbing.Hash, manifest map[string]gameTreePathKind, removePath func(string) error) error {
+	if err := cleanGameTreeToManifestWithRemover(root, manifest, removePath); err != nil {
 		return fmt.Errorf("remove non-official files: %w", err)
 	}
 	if err := repository.Storer.SetReference(plumbing.NewHashReference(gameBranchReference, target)); err != nil {
@@ -814,30 +828,69 @@ func forceSynchronizeGameTree(repository *git.Repository, worktree *git.Worktree
 	if err := repository.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, gameBranchReference)); err != nil {
 		return fmt.Errorf("attach HEAD to main: %w", err)
 	}
-	if err := worktree.Reset(&git.ResetOptions{Mode: git.HardReset, Commit: target}); err != nil {
-		return fmt.Errorf("hard reset to official revision: %w", err)
+	if err := replaceGameIndexWithCommit(repository, target); err != nil {
+		return fmt.Errorf("reset index to official revision: %w", err)
 	}
-	if err := cleanGameTreeToManifest(root, manifest); err != nil {
+	// go-git's unrestricted hard reset also removes untracked files without
+	// applying excludes. Restrict the worktree reset to official files so a
+	// Finder-created .DS_Store that cleanup could not remove cannot fail the
+	// synchronization. Rebuilding the index above discards every staged change
+	// and clears flags such as skip-worktree before the scoped hard reset.
+	if err := worktree.Reset(&git.ResetOptions{
+		Mode:   git.HardReset,
+		Commit: target,
+		Files:  gameManifestFiles(manifest),
+	}); err != nil {
+		return fmt.Errorf("hard reset official files: %w", err)
+	}
+	if err := cleanGameTreeToManifestWithRemover(root, manifest, removePath); err != nil {
 		return fmt.Errorf("remove files created during synchronization: %w", err)
 	}
-	status, err := worktree.Status()
+	return validateSynchronizedGameTree(repository, worktree, root, manifest)
+}
+
+func replaceGameIndexWithCommit(repository *git.Repository, target plumbing.Hash) error {
+	current, err := repository.Storer.Index()
 	if err != nil {
-		return fmt.Errorf("inspect synchronized working tree: %w", err)
-	}
-	if !status.IsClean() {
-		return fmt.Errorf("synchronized working tree is not clean: %s", status.String())
-	}
-	if err := validateGameTreeManifest(root, manifest); err != nil {
 		return err
 	}
-	return nil
+	commit, err := repository.CommitObject(target)
+	if err != nil {
+		return err
+	}
+	tree, err := commit.Tree()
+	if err != nil {
+		return err
+	}
+	targetIndex := &gitindex.Index{Version: current.Version}
+	if err := tree.Files().ForEach(func(file *object.File) error {
+		targetIndex.Entries = append(targetIndex.Entries, &gitindex.Entry{
+			Hash: file.Hash,
+			Name: file.Name,
+			Mode: file.Mode,
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+	sort.Slice(targetIndex.Entries, func(left, right int) bool {
+		return targetIndex.Entries[left].Name < targetIndex.Entries[right].Name
+	})
+	return repository.Storer.SetIndex(targetIndex)
 }
 
 func cleanGameTreeToManifest(root string, manifest map[string]gameTreePathKind) error {
+	return cleanGameTreeToManifestWithRemover(root, manifest, os.RemoveAll)
+}
+
+func cleanGameTreeToManifestWithRemover(root string, manifest map[string]gameTreePathKind, removePath func(string) error) error {
 	return walkManagedGameTree(root, "", func(relative, absolute string, info os.FileInfo) (bool, error) {
 		expected, exists := manifest[relative]
 		if !exists || !gameTreePathKindMatches(expected, info) {
-			if err := os.RemoveAll(absolute); err != nil {
+			if err := removePath(absolute); err != nil {
+				if !exists && isAllowedFinderMetadata(relative, info) {
+					return false, nil
+				}
 				return false, err
 			}
 			return false, nil
@@ -846,11 +899,26 @@ func cleanGameTreeToManifest(root string, manifest map[string]gameTreePathKind) 
 	})
 }
 
-func validateGameTreeManifest(root string, manifest map[string]gameTreePathKind) error {
+func gameManifestFiles(manifest map[string]gameTreePathKind) []string {
+	files := make([]string, 0, len(manifest))
+	for relative, kind := range manifest {
+		if kind == gameTreeFile {
+			files = append(files, relative)
+		}
+	}
+	sort.Strings(files)
+	return files
+}
+
+func validateGameTreeManifest(root string, manifest map[string]gameTreePathKind, tracked map[string]struct{}) error {
 	seen := make(map[string]struct{}, len(manifest))
 	err := walkManagedGameTree(root, "", func(relative, _ string, info os.FileInfo) (bool, error) {
 		expected, exists := manifest[relative]
 		if !exists {
+			_, isTracked := tracked[relative]
+			if !isTracked && isAllowedFinderMetadata(relative, info) {
+				return false, nil
+			}
 			return false, fmt.Errorf("non-official path remains after synchronization: %q", relative)
 		}
 		if !gameTreePathKindMatches(expected, info) {
@@ -870,6 +938,44 @@ func validateGameTreeManifest(root string, manifest map[string]gameTreePathKind)
 	return nil
 }
 
+func validateSynchronizedGameTree(repository *git.Repository, worktree *git.Worktree, root string, manifest map[string]gameTreePathKind) error {
+	index, err := repository.Storer.Index()
+	if err != nil {
+		return fmt.Errorf("read synchronized index: %w", err)
+	}
+	tracked := make(map[string]struct{}, len(index.Entries))
+	for _, entry := range index.Entries {
+		tracked[filepath.ToSlash(entry.Name)] = struct{}{}
+	}
+	status, err := worktree.Status()
+	if err != nil {
+		return fmt.Errorf("inspect synchronized working tree: %w", err)
+	}
+	for relative, fileStatus := range status {
+		if fileStatus.Staging == git.Unmodified && fileStatus.Worktree == git.Unmodified {
+			continue
+		}
+		normalized := filepath.ToSlash(relative)
+		_, official := manifest[normalized]
+		_, isTracked := tracked[normalized]
+		if !official && !isTracked && fileStatus.Staging == git.Untracked && fileStatus.Worktree == git.Untracked && path.Base(normalized) == finderMetadata {
+			info, statErr := os.Lstat(filepath.Join(root, filepath.FromSlash(normalized)))
+			if errors.Is(statErr, os.ErrNotExist) {
+				continue
+			}
+			if statErr == nil && isAllowedFinderMetadata(normalized, info) {
+				continue
+			}
+		}
+		return fmt.Errorf("synchronized working tree is not clean: %s", status.String())
+	}
+	return validateGameTreeManifest(root, manifest, tracked)
+}
+
+func isAllowedFinderMetadata(relative string, info os.FileInfo) bool {
+	return path.Base(filepath.ToSlash(relative)) == finderMetadata && info.Mode().IsRegular()
+}
+
 func walkManagedGameTree(root, relative string, visit func(string, string, os.FileInfo) (bool, error)) error {
 	directory := root
 	if relative != "" {
@@ -886,6 +992,9 @@ func walkManagedGameTree(root, relative string, visit func(string, string, os.Fi
 		}
 		absolute := filepath.Join(root, filepath.FromSlash(childRelative))
 		info, err := os.Lstat(absolute)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -907,6 +1016,131 @@ func gameTreePathKindMatches(expected gameTreePathKind, info os.FileInfo) bool {
 		return info.IsDir()
 	}
 	return info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0
+}
+
+func (m *gameManager) ensureManagedGameExclude(root string) {
+	if err := ensureGitInfoExclude(root); err != nil {
+		m.logger.Warn("could not configure local Finder metadata exclusion; launcher validation remains tolerant", "root", root, "error", err)
+	}
+}
+
+// go-git's protected worktree filesystem does not expose root .git paths to
+// status scans, so mirror the persisted rule into each worktree instance.
+func configureManagedGameWorktree(worktree *git.Worktree) {
+	worktree.Excludes = append(worktree.Excludes, gitignore.ParsePattern(finderMetadata, nil))
+}
+
+func ensureGitInfoExclude(root string) error {
+	gameRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return fmt.Errorf("open game root: %w", err)
+	}
+	defer gameRoot.Close()
+	gitDirectory, err := openVerifiedSubdirectory(gameRoot, ".git", "Git directory")
+	if err != nil {
+		return err
+	}
+	defer gitDirectory.Close()
+	info, err := gitDirectory.Lstat("info")
+	if errors.Is(err, os.ErrNotExist) {
+		if err := gitDirectory.Mkdir("info", 0o755); err != nil {
+			return fmt.Errorf("create Git info directory: %w", err)
+		}
+		info, err = gitDirectory.Lstat("info")
+		if err != nil {
+			return fmt.Errorf("inspect created Git info directory: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("inspect Git info directory: %w", err)
+	}
+	infoDirectory, err := openVerifiedSubdirectoryWithInfo(gitDirectory, "info", "Git info path", info)
+	if err != nil {
+		return err
+	}
+	defer infoDirectory.Close()
+	excludeInfo, err := infoDirectory.Lstat("exclude")
+	if err == nil && !excludeInfo.Mode().IsRegular() {
+		return errors.New("Git info exclude is not a regular file")
+	}
+	excludeMissing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !excludeMissing {
+		return fmt.Errorf("inspect Git info exclude: %w", err)
+	}
+	flags := os.O_RDWR | os.O_APPEND
+	if excludeMissing {
+		flags |= os.O_CREATE | os.O_EXCL
+	}
+	file, err := infoDirectory.OpenFile("exclude", flags, 0o644)
+	if err != nil {
+		return fmt.Errorf("open Git info exclude: %w", err)
+	}
+	openedInfo, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("inspect opened Git info exclude: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || (!excludeMissing && !os.SameFile(excludeInfo, openedInfo)) {
+		_ = file.Close()
+		return errors.New("Git info exclude changed while it was being opened")
+	}
+	contents, err := io.ReadAll(file)
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("read Git info exclude: %w", err)
+	}
+	for _, line := range strings.Split(string(contents), "\n") {
+		if strings.TrimSuffix(line, "\r") == finderMetadata {
+			if err := file.Close(); err != nil {
+				return fmt.Errorf("close Git info exclude: %w", err)
+			}
+			return nil
+		}
+	}
+	addition := finderMetadata + "\n"
+	if len(contents) > 0 && contents[len(contents)-1] != '\n' {
+		addition = "\n" + addition
+	}
+	written, err := file.WriteString(addition)
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("append Git info exclude: %w", err)
+	}
+	if written != len(addition) {
+		_ = file.Close()
+		return fmt.Errorf("append Git info exclude: wrote %d of %d bytes", written, len(addition))
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close Git info exclude: %w", err)
+	}
+	return nil
+}
+
+func openVerifiedSubdirectory(parent *os.Root, name, description string) (*os.Root, error) {
+	info, err := parent.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", description, err)
+	}
+	return openVerifiedSubdirectoryWithInfo(parent, name, description, info)
+}
+
+func openVerifiedSubdirectoryWithInfo(parent *os.Root, name, description string, expected os.FileInfo) (*os.Root, error) {
+	if !expected.IsDir() {
+		return nil, fmt.Errorf("%s is not a real directory", description)
+	}
+	directory, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", description, err)
+	}
+	opened, err := directory.Stat(".")
+	if err != nil {
+		_ = directory.Close()
+		return nil, fmt.Errorf("inspect opened %s: %w", description, err)
+	}
+	if !os.SameFile(expected, opened) {
+		_ = directory.Close()
+		return nil, fmt.Errorf("%s changed while it was being opened", description)
+	}
+	return directory, nil
 }
 
 func (m *gameManager) replaceSource(staging string) error {
