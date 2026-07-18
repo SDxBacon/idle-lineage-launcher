@@ -10,11 +10,16 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	git "github.com/go-git/go-git/v5"
 )
 
-const movingGameDirectory = ".moving-game"
+const (
+	movingGameDirectory      = ".moving-game"
+	gameCopyBufferSize       = 1024 * 1024
+	gameCopyProgressInterval = 200 * time.Millisecond
+)
 
 type storageUnavailableError struct{ err error }
 
@@ -678,9 +683,59 @@ func pathExists(path string) (bool, error) {
 
 type moveProgress func(phase, text string, percent int)
 
+type copyProgressReporter struct {
+	total         int64
+	copied        int64
+	progress      moveProgress
+	interval      time.Duration
+	now           func() time.Time
+	lastPublished time.Time
+	published     bool
+}
+
+func newCopyProgressReporter(total int64, progress moveProgress) *copyProgressReporter {
+	return &copyProgressReporter{
+		total:    total,
+		progress: progress,
+		interval: gameCopyProgressInterval,
+		now:      time.Now,
+	}
+}
+
+func (reporter *copyProgressReporter) Add(delta int64) {
+	if delta <= 0 {
+		return
+	}
+	reporter.copied += delta
+	percent := -1
+	if reporter.total > 0 {
+		percent = int(reporter.copied * 100 / reporter.total)
+		if percent > 99 {
+			percent = 99
+		}
+	}
+	reporter.publish("正在跨磁碟複製遊戲檔案…", percent, false)
+}
+
+func (reporter *copyProgressReporter) Complete() {
+	reporter.publish("已完成跨磁碟遊戲檔案複製", 100, true)
+}
+
+func (reporter *copyProgressReporter) publish(text string, percent int, force bool) {
+	now := reporter.now()
+	if !force && reporter.published && now.Sub(reporter.lastPublished) < reporter.interval {
+		return
+	}
+	reporter.lastPublished = now
+	reporter.published = true
+	reporter.progress("複製遊戲", text, percent)
+}
+
 func copyGameTree(source, destination string, progress moveProgress) error {
 	progress("掃描遊戲", "正在計算需要搬移的遊戲檔案…", -1)
+	scanStarted := time.Now()
 	var total int64
+	var fileCount int64
 	if err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -691,12 +746,16 @@ func copyGameTree(source, destination string, progress moveProgress) error {
 		}
 		if info.Mode().IsRegular() {
 			total += info.Size()
+			fileCount++
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
-	var copied int64
+	scanDuration := time.Since(scanStarted)
+	copyStarted := time.Now()
+	reporter := newCopyProgressReporter(total, progress)
+	buffer := make([]byte, gameCopyBufferSize)
 	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -714,14 +773,7 @@ func copyGameTree(source, destination string, progress moveProgress) error {
 		case info.IsDir():
 			return os.MkdirAll(target, info.Mode().Perm())
 		case info.Mode().IsRegular():
-			if err := copyRegularFile(path, target, info.Mode().Perm(), func(delta int64) {
-				copied += delta
-				percent := -1
-				if total > 0 {
-					percent = int(copied * 100 / total)
-				}
-				progress("複製遊戲", "正在跨磁碟複製遊戲檔案…", percent)
-			}); err != nil {
+			if err := copyRegularFile(path, target, info.Mode().Perm(), buffer, reporter.Add); err != nil {
 				return err
 			}
 			return nil
@@ -738,11 +790,23 @@ func copyGameTree(source, destination string, progress moveProgress) error {
 	if err != nil {
 		return err
 	}
-	progress("複製遊戲", "已完成跨磁碟遊戲檔案複製", 100)
+	reporter.Complete()
+	copyDuration := time.Since(copyStarted)
+	throughput := float64(0)
+	if copyDuration > 0 {
+		throughput = float64(total) / 1024 / 1024 / copyDuration.Seconds()
+	}
+	slog.Info("cross-device game copy completed",
+		"files", fileCount,
+		"bytes", total,
+		"scan_duration", scanDuration,
+		"copy_duration", copyDuration,
+		"mib_per_second", throughput,
+	)
 	return nil
 }
 
-func copyRegularFile(source, destination string, mode os.FileMode, progress func(int64)) error {
+func copyRegularFile(source, destination string, mode os.FileMode, buffer []byte, progress func(int64)) error {
 	input, err := os.Open(source)
 	if err != nil {
 		return err
@@ -752,7 +816,7 @@ func copyRegularFile(source, destination string, mode os.FileMode, progress func
 	if err != nil {
 		return err
 	}
-	written, copyErr := io.Copy(output, &progressReader{reader: input, progress: progress})
+	written, copyErr := io.CopyBuffer(output, &progressReader{reader: input, progress: progress}, buffer)
 	closeErr := output.Close()
 	if copyErr != nil {
 		return copyErr

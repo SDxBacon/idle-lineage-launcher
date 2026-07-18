@@ -481,6 +481,33 @@ func TestCopyGameTreePreservesFilesAndSymlinks(t *testing.T) {
 	}
 }
 
+func TestCopyProgressReporterThrottlesUpdates(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	var updates []int
+	reporter := newCopyProgressReporter(1_000_000, func(_, _ string, percent int) {
+		updates = append(updates, percent)
+	})
+	reporter.now = func() time.Time { return now }
+
+	for range 1_000 {
+		reporter.Add(1_000)
+		now = now.Add(time.Millisecond)
+	}
+	reporter.Complete()
+
+	if len(updates) > 6 {
+		t.Fatalf("copy progress emitted too many updates: %d (%v)", len(updates), updates)
+	}
+	if len(updates) == 0 || updates[len(updates)-1] != 100 {
+		t.Fatalf("copy progress did not finish at 100%%: %v", updates)
+	}
+	for _, percent := range updates[:len(updates)-1] {
+		if percent >= 100 {
+			t.Fatalf("copy progress reached 100%% before completion: %v", updates)
+		}
+	}
+}
+
 func newTestGameFolderCoordinator(t *testing.T, installed, customRoot bool) (*gameFolderCoordinator, *gameManager, *launcherSettingsStore) {
 	t.Helper()
 	appRoot := t.TempDir()
