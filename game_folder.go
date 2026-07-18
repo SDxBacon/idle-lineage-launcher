@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 
 	git "github.com/go-git/go-git/v5"
 )
@@ -378,7 +377,7 @@ func (coordinator *gameFolderCoordinator) moveInstallation(oldPaths, newPaths da
 	if err := coordinator.stageSource(oldPaths.Source, temporary); err == nil {
 		renamed = true
 		coordinator.manager.updateFolderMoveProgress("搬移遊戲", "正在移動遊戲檔案…", -1)
-	} else if errors.Is(err, syscall.EXDEV) {
+	} else if isCrossDeviceError(err) {
 		if err := copyGameTree(oldPaths.Source, temporary, coordinator.manager.updateFolderMoveProgress); err != nil {
 			_ = os.RemoveAll(temporary)
 			coordinator.clearPendingMove(oldPaths.GameRoot)

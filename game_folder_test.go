@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -219,10 +218,10 @@ func TestConfirmedFolderMoveMovesInstalledRepositoryAndPersistsRoot(t *testing.T
 }
 
 func TestConfirmedFolderMoveFallsBackToCopyAcrossDevices(t *testing.T) {
-	coordinator, manager, _ := newTestGameFolderCoordinator(t, true, false)
+	coordinator, manager, store := newTestGameFolderCoordinator(t, true, false)
 	oldSource := manager.paths.Source
 	candidate := t.TempDir()
-	coordinator.stageSource = func(string, string) error { return syscall.EXDEV }
+	coordinator.stageSource = func(string, string) error { return testCrossDeviceError() }
 
 	result, err := coordinator.RequestChange(candidate)
 	if err != nil {
@@ -239,6 +238,13 @@ func TestConfirmedFolderMoveFallsBackToCopyAcrossDevices(t *testing.T) {
 	}
 	if _, _, err := inspectGameSource(manager.paths.Source, manager.logger); err != nil {
 		t.Fatalf("cross-device destination is invalid: %v", err)
+	}
+	settings, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameCleanPath(settings.GameRoot, candidate) || !settings.LastKnownInstalled || settings.PendingMove != nil {
+		t.Fatalf("cross-device move was not fully persisted: %+v", settings)
 	}
 }
 
