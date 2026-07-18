@@ -35,6 +35,80 @@ export class GameBrowser {
     }
 }
 
+export class GameFolderChangeResult {
+    "cancelled": boolean;
+    "applied": boolean;
+    "requiresMove": boolean;
+    "root": string;
+    "gamePath": string;
+    "currentGamePath": string;
+
+    /** Creates a new GameFolderChangeResult instance. */
+    constructor($$source: Partial<GameFolderChangeResult> = {}) {
+        if (!("cancelled" in $$source)) {
+            this["cancelled"] = false;
+        }
+        if (!("applied" in $$source)) {
+            this["applied"] = false;
+        }
+        if (!("requiresMove" in $$source)) {
+            this["requiresMove"] = false;
+        }
+        if (!("root" in $$source)) {
+            this["root"] = "";
+        }
+        if (!("gamePath" in $$source)) {
+            this["gamePath"] = "";
+        }
+        if (!("currentGamePath" in $$source)) {
+            this["currentGamePath"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new GameFolderChangeResult instance from a string or object.
+     */
+    static createFrom($$source: any = {}): GameFolderChangeResult {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new GameFolderChangeResult($$parsedSource as Partial<GameFolderChangeResult>);
+    }
+}
+
+export class GameFolderInfo {
+    "root": string;
+    "gamePath": string;
+    "defaultRoot": string;
+    "isDefault": boolean;
+
+    /** Creates a new GameFolderInfo instance. */
+    constructor($$source: Partial<GameFolderInfo> = {}) {
+        if (!("root" in $$source)) {
+            this["root"] = "";
+        }
+        if (!("gamePath" in $$source)) {
+            this["gamePath"] = "";
+        }
+        if (!("defaultRoot" in $$source)) {
+            this["defaultRoot"] = "";
+        }
+        if (!("isDefault" in $$source)) {
+            this["isDefault"] = false;
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new GameFolderInfo instance from a string or object.
+     */
+    static createFrom($$source: any = {}): GameFolderInfo {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new GameFolderInfo($$parsedSource as Partial<GameFolderInfo>);
+    }
+}
+
 /**
  * GameLaunchResult describes a successful launch. FallbackToDefault is true
  * only when the selected browser failed and the system default handler then
@@ -143,6 +217,8 @@ export enum GameStatus {
     StatusChecking = "checking",
     StatusUpdateAvailable = "update_available",
     StatusUpdating = "updating",
+    StatusMoving = "moving",
+    StatusStorageUnavailable = "storage_unavailable",
     StatusCancelled = "cancelled",
     StatusError = "error",
 };

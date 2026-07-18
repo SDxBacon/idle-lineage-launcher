@@ -17,6 +17,7 @@ import {
   GameState,
   GameStatus,
   LauncherService,
+  type GameFolderInfo,
   type LauncherInfo,
 } from '../bindings/github.com/SDxBacon/idle-lineage-launcher';
 // import css
@@ -45,6 +46,7 @@ type LauncherView = 'dashboard' | 'settings';
 function LauncherDashboard() {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [launcherInfo, setLauncherInfo] = useState<LauncherInfo | null>(null);
+  const [gameFolderInfo, setGameFolderInfo] = useState<GameFolderInfo | null>(null);
   const [latestLauncherVersion, setLatestLauncherVersion] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
   const [view, setView] = useState<LauncherView>('dashboard');
@@ -71,6 +73,9 @@ function LauncherDashboard() {
       .catch(error => mounted && setActionError(readError(error)));
     LauncherService.GetLauncherInfo()
       .then(info => mounted && setLauncherInfo(info))
+      .catch(error => mounted && setActionError(readError(error)));
+    LauncherService.GetGameFolderInfo()
+      .then(info => mounted && setGameFolderInfo(info))
       .catch(error => mounted && setActionError(readError(error)));
 
     return () => {
@@ -145,8 +150,16 @@ function LauncherDashboard() {
     status === GameStatus.StatusChecking ||
     status === GameStatus.StatusUpdateAvailable;
   const showProgress =
-    installing || status === GameStatus.StatusChecking || status === GameStatus.StatusUpdating;
+    installing ||
+    status === GameStatus.StatusChecking ||
+    status === GameStatus.StatusUpdating ||
+    status === GameStatus.StatusMoving;
   const openGameRepository = () => runAction(() => LauncherService.OpenGameRepository());
+  const recheckGameFolder = () =>
+    runAction(async () => {
+      await LauncherService.RecheckGameFolder();
+      setGameFolderInfo(await LauncherService.GetGameFolderInfo());
+    });
 
   return (
     <StatusShell
@@ -165,17 +178,29 @@ function LauncherDashboard() {
           browsers={browsers}
           loadState={loadState}
           actionError={actionError}
+          gameState={gameState}
+          folderInfo={gameFolderInfo}
+          onFolderInfoChange={setGameFolderInfo}
           onBack={() => setView('dashboard')}
         />
       ) : (
         <>
           <p className="lead">{gameState.message || statusDescription(status)}</p>
 
+          {status === GameStatus.StatusStorageUnavailable && gameFolderInfo && (
+            <div className="mt-4 rounded-xl border border-amber-300/20 bg-amber-300/5 p-4">
+              <p className="m-0 text-xs text-amber-100/80">目前設定的儲存位置</p>
+              <p className="mt-2 mb-0 select-text break-all font-mono text-sm text-amber-50">
+                {gameFolderInfo.root}
+              </p>
+            </div>
+          )}
+
           {installed ? (
             status !== GameStatus.StatusChecking ? (
               <VersionSummary state={gameState} />
             ) : null
-          ) : !installing ? (
+          ) : canInstall ? (
             <div className="requirements" aria-label="下載需求">
               <div>
                 <strong>約 500–800 MB</strong>
@@ -214,6 +239,21 @@ function LauncherDashboard() {
               </button>
             )}
 
+            {status === GameStatus.StatusStorageUnavailable && (
+              <>
+                <button className="primary-button" type="button" onClick={recheckGameFolder}>
+                  重新檢查
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => setView('settings')}
+                >
+                  前往設定
+                </button>
+              </>
+            )}
+
             {installed && (
               <>
                 <button
@@ -225,26 +265,29 @@ function LauncherDashboard() {
                   啟動遊戲
                 </button>
                 <UpdateAction state={gameState} runAction={runAction} />
-                <div className="folder-settings-actions">
-                  <button
-                    className="secondary-button folder-button"
-                    type="button"
-                    onClick={() => runAction(() => LauncherService.OpenGameFolder())}
-                  >
-                    遊戲資料夾
-                  </button>
-                  <button
-                    className="secondary-button settings-button"
-                    type="button"
-                    aria-label="開啟啟動器設置頁"
-                    title="開啟啟動器設置頁"
-                    onClick={() => setView('settings')}
-                  >
-                    <SettingsIcon aria-hidden="true" />
-                  </button>
-                </div>
               </>
             )}
+            <div className="folder-settings-actions">
+              {installed && (
+                <button
+                  className="secondary-button folder-button"
+                  type="button"
+                  disabled={status === GameStatus.StatusMoving}
+                  onClick={() => runAction(() => LauncherService.OpenGameFolder())}
+                >
+                  遊戲資料夾
+                </button>
+              )}
+              <button
+                className="secondary-button settings-button"
+                type="button"
+                aria-label="開啟啟動器設置頁"
+                title="開啟啟動器設置頁"
+                onClick={() => setView('settings')}
+              >
+                <SettingsIcon aria-hidden="true" />
+              </button>
+            </div>
           </div>
         </>
       )}
@@ -474,6 +517,10 @@ function statusTitle(status: GameStatus) {
       return '有可用更新';
     case GameStatus.StatusUpdating:
       return '正在更新遊戲';
+    case GameStatus.StatusMoving:
+      return '正在搬移遊戲';
+    case GameStatus.StatusStorageUnavailable:
+      return '遊戲儲存位置無法使用';
     case GameStatus.StatusCancelled:
     case GameStatus.StatusError:
       return '尚未下載遊戲';
@@ -496,6 +543,10 @@ function statusDescription(status: GameStatus) {
       return '新版本已可下載；更新前仍可啟動目前版本。';
     case GameStatus.StatusUpdating:
       return '正在套用新版本，完成前暫時無法啟動。';
+    case GameStatus.StatusMoving:
+      return '正在將已安裝的遊戲搬移至新位置。';
+    case GameStatus.StatusStorageUnavailable:
+      return '請重新連接磁碟、恢復資料夾權限，或前往設定檢查位置。';
     case GameStatus.StatusCancelled:
       return '上次下載已取消，你可以隨時重新開始。';
     case GameStatus.StatusError:
@@ -511,6 +562,8 @@ function defaultProgressPhase(status: GameStatus) {
       return '檢查官方版本';
     case GameStatus.StatusUpdating:
       return '同步官方版本';
+    case GameStatus.StatusMoving:
+      return '搬移遊戲';
     case GameStatus.StatusResolving:
       return '確認官方版本';
     default:
@@ -561,7 +614,8 @@ function isInstalledState(status: GameStatus) {
     status === GameStatus.StatusReady ||
     status === GameStatus.StatusChecking ||
     status === GameStatus.StatusUpdateAvailable ||
-    status === GameStatus.StatusUpdating
+    status === GameStatus.StatusUpdating ||
+    status === GameStatus.StatusMoving
   );
 }
 

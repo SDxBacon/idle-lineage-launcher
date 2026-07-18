@@ -4,6 +4,7 @@ import (
 	"embed"
 	"log"
 	"log/slog"
+	"os"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
@@ -23,10 +24,27 @@ func init() {
 
 func main() {
 	slog.Info("launcher backend starting")
-	paths, err := resolveDataPaths()
+	defaultPaths, err := resolveDataPaths()
 	if err != nil {
 		log.Fatal(err)
 	}
+	settingsStore := newLauncherSettingsStore(defaultPaths)
+	settings, err := settingsStore.Load()
+	if err != nil {
+		slog.Error("launcher settings could not be loaded; using defaults", "error", err)
+		settings = settingsStore.defaults()
+	}
+	settings, err = recoverPendingGameMove(settingsStore, settings, defaultPaths.Root)
+	if err != nil {
+		slog.Error("pending game move recovery failed", "error", err)
+	}
+	if normalizedRoot, normalizeErr := validateGameFolderRoot(settings.GameRoot); normalizeErr == nil && !sameCleanPath(normalizedRoot, settings.GameRoot) {
+		settings.GameRoot = normalizedRoot
+		if saveErr := settingsStore.Save(settings); saveErr != nil {
+			slog.Error("normalized game root could not be persisted", "error", saveErr)
+		}
+	}
+	paths := makeDataPathsForGameRoot(defaultPaths.Root, settings.GameRoot)
 	slog.Info("application data paths resolved", "root", paths.Root, "game", paths.Game, "webview", paths.WebView)
 
 	var app *application.App
@@ -40,7 +58,8 @@ func main() {
 	}
 
 	windows := &windowFactory{}
-	service := &LauncherService{manager: manager, version: version, gameLauncher: newGameLauncher()}
+	folders := newGameFolderCoordinator(manager, settingsStore, settings, defaultPaths.Root)
+	service := &LauncherService{manager: manager, folders: folders, version: version, gameLauncher: newGameLauncher()}
 	app = application.New(application.Options{
 		Name:        "Idle Lineage Launcher",
 		Description: "Desktop launcher for Idle Lineage Class",
@@ -65,12 +84,31 @@ func main() {
 		},
 		OnShutdown: func() {
 			slog.Info("launcher shutdown callback started")
+			folders.Shutdown()
 			manager.Shutdown()
 			slog.Info("launcher shutdown callback completed")
 		},
 	})
 	service.openURL = app.Browser.OpenURL
 	service.openFolder = app.Env.OpenFileManager
+	service.selectFolder = func(current string) (string, error) {
+		directory := current
+		if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+			directory = defaultPaths.Root
+		}
+		dialog := app.Dialog.OpenFile().
+			CanChooseDirectories(true).
+			CanChooseFiles(false).
+			CanCreateDirectories(true).
+			ResolvesAliases(true).
+			SetDirectory(directory).
+			SetTitle("選擇遊戲資料夾").
+			SetButtonText("選擇")
+		if window, exists := app.Window.GetByName("launcher-window"); exists {
+			dialog.AttachToWindow(window)
+		}
+		return dialog.PromptForSingleSelection()
+	}
 	windows.app = app
 	windows.Create()
 	startStartupUpdateCheck(manager)

@@ -8,6 +8,8 @@ export {
 
 export {
     GameBrowser,
+    GameFolderChangeResult,
+    GameFolderInfo,
     GameLaunchResult,
     GameState,
     GameStatus,

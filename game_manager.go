@@ -70,15 +70,17 @@ const (
 type GameStatus string
 
 const (
-	StatusMissing         GameStatus = "missing"
-	StatusResolving       GameStatus = "resolving"
-	StatusInstalling      GameStatus = "installing"
-	StatusReady           GameStatus = "ready"
-	StatusChecking        GameStatus = "checking"
-	StatusUpdateAvailable GameStatus = "update_available"
-	StatusUpdating        GameStatus = "updating"
-	StatusCancelled       GameStatus = "cancelled"
-	StatusError           GameStatus = "error"
+	StatusMissing            GameStatus = "missing"
+	StatusResolving          GameStatus = "resolving"
+	StatusInstalling         GameStatus = "installing"
+	StatusReady              GameStatus = "ready"
+	StatusChecking           GameStatus = "checking"
+	StatusUpdateAvailable    GameStatus = "update_available"
+	StatusUpdating           GameStatus = "updating"
+	StatusMoving             GameStatus = "moving"
+	StatusStorageUnavailable GameStatus = "storage_unavailable"
+	StatusCancelled          GameStatus = "cancelled"
+	StatusError              GameStatus = "error"
 )
 
 type GameState struct {
@@ -102,19 +104,21 @@ type stateEmitter func(GameState)
 type gameManager struct {
 	mu sync.RWMutex
 
-	paths         dataPaths
-	repositoryURL string
-	initialCommit string
-	initialFetch  func(context.Context, *git.Repository, *git.FetchOptions) error
-	logger        *slog.Logger
-	emit          stateEmitter
-	state         GameState
-	activeRoot    string
-	cancel        context.CancelFunc
-	running       bool
-	wg            sync.WaitGroup
-	lastProgress  time.Time
-	revision      uint64
+	paths             dataPaths
+	repositoryURL     string
+	initialCommit     string
+	initialFetch      func(context.Context, *git.Repository, *git.FetchOptions) error
+	logger            *slog.Logger
+	emit              stateEmitter
+	state             GameState
+	activeRoot        string
+	cancel            context.CancelFunc
+	running           bool
+	wg                sync.WaitGroup
+	lastProgress      time.Time
+	folderMoveStarted time.Time
+	revision          uint64
+	onInstalledChange func(bool)
 }
 
 func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
@@ -136,7 +140,11 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 	logger.Info("initializing game manager", "root", paths.Root, "source", paths.Source, "development_commit", developmentInitialGameCommit)
 	if err := m.initialise(); err != nil {
 		logger.Error("game manager initialization failed", "error", err)
-		m.state = GameState{Status: StatusError, Message: "無法載入既有安裝", Error: err.Error()}
+		if isStorageUnavailableError(err) {
+			m.state = GameState{Status: StatusStorageUnavailable, Message: "遊戲儲存位置無法使用", Error: err.Error()}
+		} else {
+			m.state = GameState{Status: StatusError, Message: "無法載入既有安裝", Error: err.Error()}
+		}
 	} else {
 		logger.Info("game manager initialized", "status", m.state.Status, "commit", m.state.Commit)
 	}
@@ -146,59 +154,153 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 }
 
 func (m *gameManager) initialise() error {
-	m.logger.Info("preparing game data directories", "game", m.paths.Game, "staging", m.paths.Staging)
-	for _, dir := range []string{m.paths.Game, m.paths.Staging} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("create data directory: %w", err)
-		}
-	}
-	entries, err := os.ReadDir(m.paths.Staging)
+	state, activeRoot, err := inspectGameInstallation(m.paths, m.logger)
 	if err != nil {
-		return fmt.Errorf("read staging directory: %w", err)
+		return err
 	}
-	for _, entry := range entries {
-		m.logger.Info("removing stale staging entry", "entry", entry.Name())
-		if err := os.RemoveAll(filepath.Join(m.paths.Staging, entry.Name())); err != nil {
-			return fmt.Errorf("remove stale staging data: %w", err)
-		}
-	}
-
-	repository, err := git.PlainOpen(m.paths.Source)
-	if err == nil {
-		m.logger.Info("found installed Git working tree", "source", m.paths.Source)
-		m.ensureManagedGameExclude(m.paths.Source)
-		if err := validateGameRoot(m.paths.Source); err != nil {
-			return fmt.Errorf("validate installed game: %w", err)
-		}
-		head, err := repository.Head()
-		if err != nil {
-			return fmt.Errorf("read installed Git revision: %w", err)
-		}
-		commitTime, err := repositoryCommitTime(repository, head.Hash())
-		if err != nil {
-			return fmt.Errorf("read installed Git commit time: %w", err)
-		}
-		m.activeRoot = m.paths.Source
-		m.state = GameState{Status: StatusReady, Commit: head.Hash().String(), CommitTime: commitTime, Message: "遊戲已可離線使用"}
-		m.logger.Info("loaded installed Git revision", "commit", head.Hash().String())
-		return nil
-	}
-	if !errors.Is(err, git.ErrRepositoryNotExists) {
-		return fmt.Errorf("open installed Git repository: %w", err)
-	}
-	if _, statErr := os.Lstat(m.paths.Source); errors.Is(statErr, os.ErrNotExist) {
-		m.logger.Info("no installed game found")
-		return nil
-	} else if statErr != nil {
-		return fmt.Errorf("inspect installed game directory: %w", statErr)
-	}
-	return errors.New("game directory exists but is not a valid Git working tree")
+	m.state = state
+	m.activeRoot = activeRoot
+	return nil
 }
 
 func (m *gameManager) State() GameState {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.state
+}
+
+func (m *gameManager) folderChangeSnapshot() (installed, running bool, activeRoot string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.activeRoot != "", m.running, m.activeRoot
+}
+
+func (m *gameManager) applyFolderPaths(paths dataPaths, state GameState, activeRoot string) {
+	m.mu.Lock()
+	m.paths = paths
+	m.activeRoot = activeRoot
+	m.state = state
+	m.advanceRevisionLocked()
+	state = m.state
+	m.mu.Unlock()
+	m.publish(state)
+}
+
+func (m *gameManager) commitFolderPaths(paths dataPaths, state GameState, activeRoot string, persist func() error) error {
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return errors.New("請等待目前的遊戲作業完成後再變更資料夾")
+	}
+	if err := persist(); err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	m.paths = paths
+	m.activeRoot = activeRoot
+	m.state = state
+	m.advanceRevisionLocked()
+	state = m.state
+	m.mu.Unlock()
+	m.publish(state)
+	return nil
+}
+
+func (m *gameManager) applyFolderInspectionError(paths dataPaths, err error) {
+	m.mu.Lock()
+	m.paths = paths
+	if isStorageUnavailableError(err) {
+		m.state.Status = StatusStorageUnavailable
+		m.state.Message = "遊戲儲存位置無法使用"
+	} else {
+		m.state.Status = StatusError
+		m.state.Message = "遊戲資料內容異常"
+	}
+	m.state.Error = err.Error()
+	m.advanceRevisionLocked()
+	state := m.state
+	m.mu.Unlock()
+	m.publish(state)
+}
+
+func (m *gameManager) beginFolderMove(expected dataPaths) (GameState, error) {
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+		return GameState{}, errors.New("請等待目前的遊戲作業完成後再搬移")
+	}
+	if m.activeRoot == "" || !sameCleanPath(m.activeRoot, expected.Source) {
+		m.mu.Unlock()
+		return GameState{}, errors.New("目前遊戲位置已變更，請重新選擇資料夾")
+	}
+	previous := m.state
+	switch previous.Status {
+	case StatusReady, StatusUpdateAvailable:
+	default:
+		m.mu.Unlock()
+		return GameState{}, fmt.Errorf("目前狀態 %q 無法搬移遊戲", previous.Status)
+	}
+	m.running = true
+	m.state.Status = StatusMoving
+	m.state.Message = "正在搬移遊戲至新位置…"
+	m.state.Error = ""
+	m.state.ProgressPhase = "準備搬移"
+	m.state.ProgressText = "正在準備遊戲檔案…"
+	m.state.ProgressPercent = -1
+	m.state.ProgressSeconds = 0
+	m.folderMoveStarted = time.Now()
+	m.advanceRevisionLocked()
+	state := m.state
+	m.wg.Add(1)
+	m.mu.Unlock()
+	m.publish(state)
+	return previous, nil
+}
+
+func (m *gameManager) updateFolderMoveProgress(phase, text string, percent int) {
+	m.mu.RLock()
+	started := m.folderMoveStarted
+	m.mu.RUnlock()
+	seconds := int64(0)
+	if !started.IsZero() {
+		seconds = int64(time.Since(started).Seconds())
+	}
+	m.updateGitProgress(phase, text, percent, seconds, true)
+}
+
+func (m *gameManager) finishFolderMoveFailure(previous GameState) {
+	m.mu.Lock()
+	m.running = false
+	m.folderMoveStarted = time.Time{}
+	m.state = previous
+	m.state.Error = ""
+	m.advanceRevisionLocked()
+	state := m.state
+	m.mu.Unlock()
+	m.wg.Done()
+	m.publish(state)
+}
+
+func (m *gameManager) finishFolderMoveSuccess(paths dataPaths, previous GameState) {
+	m.mu.Lock()
+	m.paths = paths
+	m.activeRoot = paths.Source
+	m.running = false
+	m.folderMoveStarted = time.Time{}
+	m.state = previous
+	m.state.Status = StatusReady
+	m.state.UpdateAvailable = false
+	m.state.Message = "遊戲已搬移至新位置"
+	m.state.Error = ""
+	m.state.ProgressPhase = ""
+	m.state.ProgressText = ""
+	m.state.ProgressPercent = 0
+	m.state.ProgressSeconds = 0
+	m.advanceRevisionLocked()
+	state := m.state
+	m.mu.Unlock()
+	m.wg.Done()
+	m.publish(state)
 }
 
 func (m *gameManager) ActiveVersion() (root, commit string, ok bool) {
@@ -221,6 +323,22 @@ func (m *gameManager) reconcileMissingActiveGame() (bool, error) {
 		return false, nil
 	}
 	root := m.activeRoot
+	// Every manager created by the application has GameRoot populated. Keep the
+	// guard for small in-package managers used by callers that only provide an
+	// active Source path; there is no independent storage root to probe in that
+	// case.
+	if m.paths.GameRoot != "" {
+		if _, err := validateGameFolderRoot(m.paths.GameRoot); err != nil {
+			m.state.Status = StatusStorageUnavailable
+			m.state.Message = "遊戲儲存位置無法使用"
+			m.state.Error = err.Error()
+			m.advanceRevisionLocked()
+			state := m.state
+			m.mu.Unlock()
+			m.publish(state)
+			return true, nil
+		}
+	}
 	missing, err := gameRootMissing(root)
 	if err != nil {
 		m.mu.Unlock()
@@ -239,6 +357,9 @@ func (m *gameManager) reconcileMissingActiveGame() (bool, error) {
 	}
 	m.logger.Warn("active game installation disappeared", "root", root)
 	m.publish(state)
+	if m.onInstalledChange != nil {
+		m.onInstalledChange(false)
+	}
 	return true, nil
 }
 
@@ -279,9 +400,38 @@ func (m *gameManager) withLaunchableRoot(open func(string) error) error {
 	return open(m.activeRoot)
 }
 
+func (m *gameManager) withOpenableRoot(open func(string) error) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	switch m.state.Status {
+	case StatusReady, StatusChecking, StatusUpdateAvailable, StatusUpdating:
+	default:
+		return fmt.Errorf("game folder cannot be opened while status is %q", m.state.Status)
+	}
+	if m.activeRoot == "" {
+		return errors.New("game is not installed")
+	}
+	return open(m.activeRoot)
+}
+
 func (m *gameManager) StartInstall() error {
 	m.logger.Info("install requested")
 	m.mu.Lock()
+	if _, err := validateGameFolderRoot(m.paths.GameRoot); err != nil {
+		if isStorageUnavailableError(err) {
+			m.state.Status = StatusStorageUnavailable
+			m.state.Message = "遊戲儲存位置無法使用"
+		} else {
+			m.state.Status = StatusError
+			m.state.Message = "遊戲資料內容異常"
+		}
+		m.state.Error = err.Error()
+		m.advanceRevisionLocked()
+		state := m.state
+		m.mu.Unlock()
+		m.publish(state)
+		return err
+	}
 	if m.running || m.activeRoot != "" {
 		m.logger.Info("install request ignored", "running", m.running, "installed", m.activeRoot != "")
 		m.mu.Unlock()
@@ -455,6 +605,9 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 		m.logger.Error("Git job failed", "operation", operation, "error", err)
 	}
 	m.publish(state)
+	if reconciledMissing && m.onInstalledChange != nil {
+		m.onInstalledChange(false)
+	}
 }
 
 func userFacingOperationError(operation string) string {
@@ -1191,6 +1344,9 @@ func (m *gameManager) activate(sha, commitTime, message string) error {
 	state := m.state
 	m.mu.Unlock()
 	m.publish(state)
+	if m.onInstalledChange != nil {
+		m.onInstalledChange(true)
+	}
 	return nil
 }
 

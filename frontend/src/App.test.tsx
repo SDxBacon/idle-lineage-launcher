@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toast } from 'sonner';
 import App from './App';
@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => {
     listeners,
     getGameBrowsers: vi.fn(),
     getGameState: vi.fn(),
+    getGameFolderInfo: vi.fn(),
     getLauncherInfo: vi.fn(),
     startInstall: vi.fn(),
     checkForUpdate: vi.fn(),
@@ -19,6 +20,10 @@ const mocks = vi.hoisted(() => {
     openGameFolder: vi.fn(),
     openGameRepository: vi.fn(),
     openLauncherRepository: vi.fn(),
+    selectGameFolder: vi.fn(),
+    restoreDefaultGameFolder: vi.fn(),
+    confirmGameFolderMove: vi.fn(),
+    recheckGameFolder: vi.fn(),
     fetchLatestRelease: vi.fn(),
     unsubscribe: vi.fn(),
   };
@@ -52,12 +57,15 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
     StatusChecking: 'checking',
     StatusUpdateAvailable: 'update_available',
     StatusUpdating: 'updating',
+    StatusMoving: 'moving',
+    StatusStorageUnavailable: 'storage_unavailable',
     StatusCancelled: 'cancelled',
     StatusError: 'error',
   },
   LauncherService: {
     GetGameBrowsers: mocks.getGameBrowsers,
     GetGameState: mocks.getGameState,
+    GetGameFolderInfo: mocks.getGameFolderInfo,
     GetLauncherInfo: mocks.getLauncherInfo,
     StartInstall: mocks.startInstall,
     CheckForUpdate: mocks.checkForUpdate,
@@ -67,6 +75,10 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
     OpenGameFolder: mocks.openGameFolder,
     OpenGameRepository: mocks.openGameRepository,
     OpenLauncherRepository: mocks.openLauncherRepository,
+    SelectGameFolder: mocks.selectGameFolder,
+    RestoreDefaultGameFolder: mocks.restoreDefaultGameFolder,
+    ConfirmGameFolderMove: mocks.confirmGameFolderMove,
+    RecheckGameFolder: mocks.recheckGameFolder,
   },
 }));
 
@@ -128,6 +140,12 @@ describe('App', () => {
       version: '0.1.0',
       gameRepository: 'shines871/idle-lineage-class',
     });
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      gamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: true,
+    });
     mocks.startInstall.mockResolvedValue(undefined);
     mocks.checkForUpdate.mockResolvedValue(undefined);
     mocks.startUpdate.mockResolvedValue(undefined);
@@ -136,6 +154,10 @@ describe('App', () => {
     mocks.openGameFolder.mockResolvedValue(undefined);
     mocks.openGameRepository.mockResolvedValue(undefined);
     mocks.openLauncherRepository.mockResolvedValue(undefined);
+    mocks.selectGameFolder.mockResolvedValue({ cancelled: true });
+    mocks.restoreDefaultGameFolder.mockResolvedValue({ cancelled: true });
+    mocks.confirmGameFolderMove.mockResolvedValue(undefined);
+    mocks.recheckGameFolder.mockResolvedValue(undefined);
     mocks.fetchLatestRelease.mockResolvedValue(releaseResponse('v0.1.0'));
     vi.stubGlobal('fetch', mocks.fetchLatestRelease);
   });
@@ -163,7 +185,7 @@ describe('App', () => {
     expect(screen.getByText('SDxBacon').closest('footer')).toHaveClass('launcher-footer');
     expect(screen.getByText('約 500–800 MB')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '遊戲資料夾' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '開啟啟動器設置頁' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '開啟啟動器設置頁' })).toBeEnabled();
     expect(mocks.getGameState).toHaveBeenCalledTimes(1);
     expect(mocks.getLauncherInfo).toHaveBeenCalledTimes(1);
     expect(mocks.getGameBrowsers).toHaveBeenCalledTimes(1);
@@ -384,7 +406,12 @@ describe('App', () => {
     expect(useGameLaunchConfigStore.getState().browserID).toBe('browser:chrome');
     expect(screen.getByRole('heading', { name: '遊戲資料夾', level: 2 })).toBeInTheDocument();
     expect(
-      screen.getByText('Lorem ipsum dolor sit amet, consectetur adipiscing elit.'),
+      screen.getByDisplayValue('/Users/test/Library/Application Support/IdleLineageLauncher'),
+    ).toHaveAttribute('readonly');
+    expect(
+      screen.getByText(
+        '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText('v0.1.0')).toBeInTheDocument();
 
@@ -680,7 +707,7 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: '尚未下載遊戲' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '下載遊戲' })).toBeEnabled();
     expect(screen.queryByRole('button', { name: '啟動遊戲' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '開啟啟動器設置頁' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '開啟啟動器設置頁' })).toBeEnabled();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -736,5 +763,315 @@ describe('App', () => {
     expect(screen.getByText('目前已是最新版本')).toBeInTheDocument();
     expect(screen.queryByText('正在比較 local HEAD 與 origin/main…')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: '檢查更新' })).toBeEnabled();
+  });
+
+  it('shows the full game path tooltip when the path is truncated', async () => {
+    const scrollWidth = vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(320);
+    const clientWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(160);
+
+    try {
+      mocks.getGameState.mockResolvedValue(state());
+      render(<App />);
+
+      fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+      const gamePath = await screen.findByText(
+        '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+      );
+      expect(gamePath).toHaveAttribute('data-tooltip-id', 'game-folder-path-tooltip');
+      expect(gamePath).toHaveAttribute('data-tooltip-content', gamePath.textContent);
+
+      fireEvent.mouseEnter(gamePath);
+      const tooltip = await screen.findByRole('tooltip');
+      expect(tooltip).toHaveTextContent(gamePath.textContent || '');
+      expect(tooltip).toHaveStyle({
+        backgroundColor: '#59616c',
+        color: '#f8fafc',
+        zIndex: '100',
+      });
+    } finally {
+      scrollWidth.mockRestore();
+      clientWidth.mockRestore();
+    }
+  });
+
+  it('does not show a game path tooltip when the full path fits', async () => {
+    const scrollWidth = vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockReturnValue(160);
+    const clientWidth = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(160);
+
+    try {
+      mocks.getGameState.mockResolvedValue(state());
+      render(<App />);
+
+      fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+      const gamePath = await screen.findByText(
+        '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+      );
+      expect(gamePath).not.toHaveAttribute('data-tooltip-id');
+      expect(gamePath).not.toHaveAttribute('data-tooltip-content');
+
+      fireEvent.mouseEnter(gamePath);
+      expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    } finally {
+      scrollWidth.mockRestore();
+      clientWidth.mockRestore();
+    }
+  });
+
+  it('applies an uninstalled folder selection without showing a move dialog', async () => {
+    mocks.getGameState.mockResolvedValue(state());
+    mocks.selectGameFolder.mockResolvedValue({
+      cancelled: false,
+      applied: true,
+      requiresMove: false,
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      currentGamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    await screen.findByDisplayValue('/Users/test/Library/Application Support/IdleLineageLauncher');
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: false,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '選擇資料夾' }));
+
+    expect(await screen.findByDisplayValue('/Volumes/GameSSD')).toHaveAttribute('readonly');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(mocks.confirmGameFolderMove).not.toHaveBeenCalled();
+  });
+
+  it('leaves the current folder unchanged when the native picker is cancelled', async () => {
+    mocks.getGameState.mockResolvedValue(state());
+    mocks.selectGameFolder.mockResolvedValue({ cancelled: true });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    const current = await screen.findByDisplayValue(
+      '/Users/test/Library/Application Support/IdleLineageLauncher',
+    );
+    fireEvent.click(screen.getByRole('button', { name: '選擇資料夾' }));
+
+    await waitFor(() => expect(mocks.selectGameFolder).toHaveBeenCalledOnce());
+    expect(current).toHaveValue('/Users/test/Library/Application Support/IdleLineageLauncher');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('restores an uninstalled custom folder to the default root', async () => {
+    mocks.getGameState.mockResolvedValue(state());
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: false,
+    });
+    mocks.restoreDefaultGameFolder.mockResolvedValue({
+      cancelled: false,
+      applied: true,
+      requiresMove: false,
+      root: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      gamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+      currentGamePath: '/Volumes/GameSSD/game/shines871',
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    await screen.findByDisplayValue('/Volumes/GameSSD');
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      gamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: true,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '恢復預設位置' }));
+
+    expect(
+      await screen.findByDisplayValue(
+        '/Users/test/Library/Application Support/IdleLineageLauncher',
+      ),
+    ).toBeInTheDocument();
+    const restoreDefaultButton = screen.getByRole('button', { name: '恢復預設位置' });
+    expect(restoreDefaultButton).toBeDisabled();
+    expect(restoreDefaultButton).toHaveClass(
+      'disabled:pointer-events-auto',
+      'disabled:cursor-not-allowed',
+      'disabled:border-slate-700',
+      'disabled:bg-slate-800',
+      'disabled:text-slate-500',
+      'disabled:opacity-100',
+    );
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('requires explicit confirmation before moving an installed game', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({ status: 'ready', commit: 'local-commit', message: '遊戲已就緒' }),
+    );
+    mocks.selectGameFolder.mockResolvedValue({
+      cancelled: false,
+      applied: false,
+      requiresMove: true,
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      currentGamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    fireEvent.click(await screen.findByRole('button', { name: '選擇資料夾' }));
+
+    const dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).getByText('/Volumes/GameSSD/game/shines871')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '返回' })).toBeEnabled();
+    expect(within(dialog).getByRole('button', { name: '確認' })).toBeEnabled();
+    expect(mocks.confirmGameFolderMove).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '返回' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(mocks.confirmGameFolderMove).not.toHaveBeenCalled();
+  });
+
+  it('confirms the installed game move and refreshes the effective path', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({ status: 'ready', commit: 'local-commit', message: '遊戲已就緒' }),
+    );
+    mocks.selectGameFolder.mockResolvedValue({
+      cancelled: false,
+      applied: false,
+      requiresMove: true,
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      currentGamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+    });
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    await screen.findByDisplayValue('/Users/test/Library/Application Support/IdleLineageLauncher');
+    fireEvent.click(screen.getByRole('button', { name: '選擇資料夾' }));
+    const dialog = await screen.findByRole('alertdialog');
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: false,
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '確認' }));
+
+    await waitFor(() =>
+      expect(mocks.confirmGameFolderMove).toHaveBeenCalledWith('/Volumes/GameSSD'),
+    );
+    expect(await screen.findByDisplayValue('/Volumes/GameSSD')).toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('keeps the move dialog locked during progress and allows retry after failure', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({ status: 'ready', commit: 'local-commit', message: '遊戲已就緒' }),
+    );
+    mocks.selectGameFolder.mockResolvedValue({
+      cancelled: false,
+      applied: false,
+      requiresMove: true,
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      currentGamePath: '/Users/test/Library/Application Support/IdleLineageLauncher/game/shines871',
+    });
+    let rejectMove!: (reason: Error) => void;
+    mocks.confirmGameFolderMove.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectMove = reject;
+      }),
+    );
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    fireEvent.click(await screen.findByRole('button', { name: '選擇資料夾' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: '確認' }));
+    emit(
+      'launcher:game-state',
+      state({
+        revision: 2,
+        status: 'moving',
+        commit: 'local-commit',
+        progressPhase: '複製遊戲',
+        progressText: '正在跨磁碟複製遊戲檔案…',
+        progressPercent: 42,
+      }),
+    );
+
+    expect(within(dialog).getByRole('button', { name: '返回' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: '搬移中…' })).toBeDisabled();
+    expect(within(dialog).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '42');
+    expect(within(dialog).getByText('正在跨磁碟複製遊戲檔案…')).toBeInTheDocument();
+
+    await act(async () => rejectMove(new Error('搬移驗證失敗')));
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('搬移驗證失敗');
+    expect(within(dialog).getByRole('button', { name: '返回' })).toBeEnabled();
+    expect(within(dialog).getByRole('button', { name: '確認' })).toBeEnabled();
+
+    mocks.confirmGameFolderMove.mockResolvedValueOnce(undefined);
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: false,
+    });
+    fireEvent.click(within(dialog).getByRole('button', { name: '確認' }));
+    await waitFor(() => expect(mocks.confirmGameFolderMove).toHaveBeenCalledTimes(2));
+    expect(await screen.findByDisplayValue('/Volumes/GameSSD')).toBeInTheDocument();
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('shows a default destination conflict without opening the move dialog', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({ status: 'ready', commit: 'local-commit', message: '遊戲已就緒' }),
+    );
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Volumes/GameSSD',
+      gamePath: '/Volumes/GameSSD/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: false,
+    });
+    mocks.restoreDefaultGameFolder.mockRejectedValue(
+      new Error('預設位置已有遊戲，請先自行清理後再重試'),
+    );
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '開啟啟動器設置頁' }));
+    fireEvent.click(await screen.findByRole('button', { name: '恢復預設位置' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '預設位置已有遊戲，請先自行清理後再重試',
+    );
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  });
+
+  it('renders the unavailable storage recovery actions and configured root', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({
+        status: 'storage_unavailable',
+        message: '遊戲儲存位置無法使用',
+        error: '找不到目前設定的遊戲資料夾',
+      }),
+    );
+    mocks.getGameFolderInfo.mockResolvedValue({
+      root: '/Volumes/MissingSSD',
+      gamePath: '/Volumes/MissingSSD/game/shines871',
+      defaultRoot: '/Users/test/Library/Application Support/IdleLineageLauncher',
+      isDefault: false,
+    });
+    render(<App />);
+
+    expect(
+      await screen.findByRole('heading', { name: '遊戲儲存位置無法使用' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('/Volumes/MissingSSD')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重新檢查' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '前往設定' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '開啟啟動器設置頁' })).toBeEnabled();
   });
 });

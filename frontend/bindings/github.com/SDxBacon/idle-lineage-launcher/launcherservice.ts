@@ -17,27 +17,37 @@ export function CheckForUpdate(): $CancellablePromise<void> {
     return $Call.ByID(4076042935);
 }
 
+export function ConfirmGameFolderMove(root: string): $CancellablePromise<void> {
+    return $Call.ByID(1100233112, root);
+}
+
 export function GetGameBrowsers(): $CancellablePromise<$models.GameBrowser[]> {
     return $Call.ByID(1785724032).then(($result: any) => {
         return $$createType1($result);
     });
 }
 
+export function GetGameFolderInfo(): $CancellablePromise<$models.GameFolderInfo> {
+    return $Call.ByID(3110728385).then(($result: any) => {
+        return $$createType2($result);
+    });
+}
+
 export function GetGameState(): $CancellablePromise<$models.GameState> {
     return $Call.ByID(1448081722).then(($result: any) => {
-        return $$createType2($result);
+        return $$createType3($result);
     });
 }
 
 export function GetLauncherInfo(): $CancellablePromise<$models.LauncherInfo> {
     return $Call.ByID(2292426071).then(($result: any) => {
-        return $$createType3($result);
+        return $$createType4($result);
     });
 }
 
 export function LaunchGame(browserID: string | null): $CancellablePromise<$models.GameLaunchResult> {
     return $Call.ByID(2893946080, browserID).then(($result: any) => {
-        return $$createType4($result);
+        return $$createType5($result);
     });
 }
 
@@ -53,6 +63,22 @@ export function OpenLauncherRepository(): $CancellablePromise<void> {
     return $Call.ByID(2042697873);
 }
 
+export function RecheckGameFolder(): $CancellablePromise<void> {
+    return $Call.ByID(1416235502);
+}
+
+export function RestoreDefaultGameFolder(): $CancellablePromise<$models.GameFolderChangeResult> {
+    return $Call.ByID(3908679352).then(($result: any) => {
+        return $$createType6($result);
+    });
+}
+
+export function SelectGameFolder(): $CancellablePromise<$models.GameFolderChangeResult> {
+    return $Call.ByID(2745989519).then(($result: any) => {
+        return $$createType6($result);
+    });
+}
+
 export function StartInstall(): $CancellablePromise<void> {
     return $Call.ByID(3525102106);
 }
@@ -64,6 +90,8 @@ export function StartUpdate(): $CancellablePromise<void> {
 // Private type creation functions
 const $$createType0 = $models.GameBrowser.createFrom;
 const $$createType1 = $Create.Array($$createType0);
-const $$createType2 = $models.GameState.createFrom;
-const $$createType3 = $models.LauncherInfo.createFrom;
-const $$createType4 = $models.GameLaunchResult.createFrom;
+const $$createType2 = $models.GameFolderInfo.createFrom;
+const $$createType3 = $models.GameState.createFrom;
+const $$createType4 = $models.LauncherInfo.createFrom;
+const $$createType5 = $models.GameLaunchResult.createFrom;
+const $$createType6 = $models.GameFolderChangeResult.createFrom;

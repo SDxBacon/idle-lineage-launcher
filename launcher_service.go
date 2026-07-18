@@ -11,6 +11,7 @@ import (
 
 type urlOpener func(string) error
 type folderOpener func(string, bool) error
+type folderSelector func(string) (string, error)
 
 const launcherRepositoryPageURL = "https://github.com/SDxBacon/idle-lineage-launcher"
 
@@ -23,8 +24,67 @@ type LauncherService struct {
 	manager      *gameManager
 	version      string
 	gameLauncher *GameLauncher
+	folders      *gameFolderCoordinator
 	openURL      urlOpener
 	openFolder   folderOpener
+	selectFolder folderSelector
+}
+
+func (service *LauncherService) GetGameFolderInfo() GameFolderInfo {
+	slog.Info("backend service call", "method", "GetGameFolderInfo")
+	if service == nil || service.folders == nil {
+		return GameFolderInfo{}
+	}
+	return service.folders.Info()
+}
+
+func (service *LauncherService) SelectGameFolder() (GameFolderChangeResult, error) {
+	slog.Info("backend service call", "method", "SelectGameFolder")
+	if service == nil || service.folders == nil || service.selectFolder == nil {
+		return GameFolderChangeResult{}, errors.New("game folder selector is unavailable")
+	}
+	selection, err := service.selectFolder(service.folders.Info().Root)
+	if err != nil {
+		return GameFolderChangeResult{}, fmt.Errorf("open game folder selector: %w", err)
+	}
+	if selection == "" {
+		return GameFolderChangeResult{Cancelled: true}, nil
+	}
+	return service.folders.RequestChange(selection)
+}
+
+func (service *LauncherService) RestoreDefaultGameFolder() (GameFolderChangeResult, error) {
+	slog.Info("backend service call", "method", "RestoreDefaultGameFolder")
+	if service == nil || service.folders == nil {
+		return GameFolderChangeResult{}, errors.New("game folder settings are unavailable")
+	}
+	info := service.folders.Info()
+	if info.IsDefault {
+		return GameFolderChangeResult{}, nil
+	}
+	return service.folders.RequestChange(info.DefaultRoot)
+}
+
+func (service *LauncherService) ConfirmGameFolderMove(root string) error {
+	slog.Info("backend service call", "method", "ConfirmGameFolderMove", "root", root)
+	if service == nil || service.folders == nil {
+		return errors.New("game folder settings are unavailable")
+	}
+	return service.folders.ConfirmMove(root)
+}
+
+func (service *LauncherService) RecheckGameFolder() error {
+	slog.Info("backend service call", "method", "RecheckGameFolder")
+	if service == nil || service.folders == nil || service.manager == nil {
+		return errors.New("game folder settings are unavailable")
+	}
+	if err := service.folders.Recheck(); err != nil {
+		return err
+	}
+	if _, _, installed := service.manager.ActiveVersion(); installed {
+		return service.manager.StartCheckForUpdate()
+	}
+	return nil
 }
 
 func (service *LauncherService) GetLauncherInfo() LauncherInfo {
@@ -105,18 +165,16 @@ func (service *LauncherService) OpenGameFolder() error {
 	} else if missing {
 		return nil
 	}
-	root, _, installed := service.manager.ActiveVersion()
-	if !installed {
-		return errors.New("game is not installed")
-	}
 	if service.openFolder == nil {
 		return errors.New("system folder opener is unavailable")
 	}
-	slog.Info("opening installed game directory", "directory", root)
-	if err := service.openFolder(root, false); err != nil {
-		return fmt.Errorf("open game folder: %w", err)
-	}
-	return nil
+	return service.manager.withOpenableRoot(func(root string) error {
+		slog.Info("opening installed game directory", "directory", root)
+		if err := service.openFolder(root, false); err != nil {
+			return fmt.Errorf("open game folder: %w", err)
+		}
+		return nil
+	})
 }
 
 func (service *LauncherService) OpenGameRepository() error {
