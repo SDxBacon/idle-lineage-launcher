@@ -11,7 +11,7 @@ info:
   description: "Desktop launcher for Idle Lineage Class"
   copyright: "Copyright (c) 2026 SDxBacon"
   comments: "Downloads and launches the official Idle Lineage Class main branch."
-  version: "0.1.0"
+  version: "0.2.0"
   # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)
   #                               # Should match the name of your .icon file without the extension
   #                               # If not set and Assets.car exists, defaults to "appicon"

@@ -2,7 +2,7 @@ version: '3'
 
 vars:
   APP_NAME: "idle-lineage-launcher"
-  VERSION: "0.1.0"
+  VERSION: { sh: 'go run ./build/version.go' }
   BIN_DIR: "bin"
   PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
@@ -134,3 +134,21 @@ tasks:
   #   summary: Builds and runs the Docker image
   #   cmds:
   #     - task: common:run:docker
+
+  bump:
+    summary: 'Bump patch version (e.g. 0.1.0 → 0.1.1). Override with SET_VERSION=x.y.z'
+    cmds:
+      - go run ./build/bump_version.go '{{if .SET_VERSION}}{{.SET_VERSION}}{{else}}patch{{end}}'
+      - wails3 task common:update:build-assets
+
+  bump:minor:
+    summary: 'Bump minor version (e.g. 0.1.0 → 0.2.0)'
+    cmds:
+      - go run ./build/bump_version.go minor
+      - wails3 task common:update:build-assets
+
+  bump:major:
+    summary: 'Bump major version (e.g. 0.1.0 → 1.0.0)'
+    cmds:
+      - go run ./build/bump_version.go major
+      - wails3 task common:update:build-assets
