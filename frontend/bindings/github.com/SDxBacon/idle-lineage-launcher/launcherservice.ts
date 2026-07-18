@@ -13,6 +13,14 @@ export function CancelInstall(): $CancellablePromise<void> {
     return $Call.ByID(2625956878);
 }
 
+export function CancelUpdate(): $CancellablePromise<void> {
+    return $Call.ByID(3700641350);
+}
+
+export function CancelUpdateAndClose(): $CancellablePromise<void> {
+    return $Call.ByID(3419917269);
+}
+
 export function CheckForUpdate(): $CancellablePromise<void> {
     return $Call.ByID(4076042935);
 }
@@ -71,6 +79,10 @@ export function RestoreDefaultGameFolder(): $CancellablePromise<$models.GameFold
     return $Call.ByID(3908679352).then(($result: any) => {
         return $$createType6($result);
     });
+}
+
+export function RetryUpdateRecovery(): $CancellablePromise<void> {
+    return $Call.ByID(1818775563);
 }
 
 export function SelectGameFolder(): $CancellablePromise<$models.GameFolderChangeResult> {

@@ -77,6 +77,8 @@ const (
 	StatusChecking           GameStatus = "checking"
 	StatusUpdateAvailable    GameStatus = "update_available"
 	StatusUpdating           GameStatus = "updating"
+	StatusRecovering         GameStatus = "recovering"
+	StatusRecoveryFailed     GameStatus = "recovery_failed"
 	StatusMoving             GameStatus = "moving"
 	StatusStorageUnavailable GameStatus = "storage_unavailable"
 	StatusCancelled          GameStatus = "cancelled"
@@ -84,19 +86,22 @@ const (
 )
 
 type GameState struct {
-	Revision         uint64     `json:"revision"`
-	Status           GameStatus `json:"status"`
-	Commit           string     `json:"commit"`
-	CommitTime       string     `json:"commitTime"`
-	RemoteCommit     string     `json:"remoteCommit"`
-	RemoteCommitTime string     `json:"remoteCommitTime"`
-	UpdateAvailable  bool       `json:"updateAvailable"`
-	ProgressPhase    string     `json:"progressPhase"`
-	ProgressText     string     `json:"progressText"`
-	ProgressPercent  int        `json:"progressPercent"`
-	ProgressSeconds  int64      `json:"progressSeconds"`
-	Message          string     `json:"message"`
-	Error            string     `json:"error"`
+	Revision            uint64     `json:"revision"`
+	Status              GameStatus `json:"status"`
+	Commit              string     `json:"commit"`
+	CommitTime          string     `json:"commitTime"`
+	RemoteCommit        string     `json:"remoteCommit"`
+	RemoteCommitTime    string     `json:"remoteCommitTime"`
+	UpdateAvailable     bool       `json:"updateAvailable"`
+	ProgressPhase       string     `json:"progressPhase"`
+	ProgressText        string     `json:"progressText"`
+	ProgressPercent     int        `json:"progressPercent"`
+	ProgressSeconds     int64      `json:"progressSeconds"`
+	ProgressStep        int        `json:"progressStep"`
+	ProgressStepTotal   int        `json:"progressStepTotal"`
+	ProgressCancellable bool       `json:"progressCancellable"`
+	Message             string     `json:"message"`
+	Error               string     `json:"error"`
 }
 
 type stateEmitter func(GameState)
@@ -104,21 +109,29 @@ type stateEmitter func(GameState)
 type gameManager struct {
 	mu sync.RWMutex
 
-	paths             dataPaths
-	repositoryURL     string
-	initialCommit     string
-	initialFetch      func(context.Context, *git.Repository, *git.FetchOptions) error
-	logger            *slog.Logger
-	emit              stateEmitter
-	state             GameState
-	activeRoot        string
-	cancel            context.CancelFunc
-	running           bool
-	wg                sync.WaitGroup
-	lastProgress      time.Time
-	folderMoveStarted time.Time
-	revision          uint64
-	onInstalledChange func(bool)
+	paths               dataPaths
+	repositoryURL       string
+	initialCommit       string
+	initialFetch        func(context.Context, *git.Repository, *git.FetchOptions) error
+	synchronizeUpdate   func(*git.Repository, *git.Worktree, string, plumbing.Hash, map[string]gameTreePathKind) error
+	beforeUpdateApply   func()
+	afterUpdateCritical func()
+	logger              *slog.Logger
+	emit                stateEmitter
+	state               GameState
+	activeRoot          string
+	cancel              context.CancelFunc
+	running             bool
+	wg                  sync.WaitGroup
+	lastProgress        time.Time
+	operationProgress   *gameOperationProgress
+	progressSequence    uint64
+	journalStore        *updateJournalStore
+	pendingJournal      *updateJournal
+	journalLoadError    error
+	folderMoveStarted   time.Time
+	revision            uint64
+	onInstalledChange   func(bool)
 }
 
 func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
@@ -130,15 +143,35 @@ func newGameManager(paths dataPaths, emit stateEmitter) (*gameManager, error) {
 		initialFetch: func(ctx context.Context, repository *git.Repository, options *git.FetchOptions) error {
 			return repository.FetchContext(ctx, options)
 		},
-		logger: logger,
-		emit:   emit,
+		synchronizeUpdate: forceSynchronizeGameTree,
+		logger:            logger,
+		emit:              emit,
 		state: GameState{
 			Status:  StatusMissing,
 			Message: "尚未下載遊戲",
 		},
 	}
+	m.journalStore = newUpdateJournalStore(paths)
 	logger.Info("initializing game manager", "root", paths.Root, "source", paths.Source, "development_commit", developmentInitialGameCommit)
-	if err := m.initialise(); err != nil {
+	journal, journalErr := m.journalStore.Load()
+	if journalErr != nil {
+		logger.Error("update recovery journal could not be loaded", "error", journalErr)
+		m.journalLoadError = journalErr
+		m.state = GameState{Status: StatusRecoveryFailed, Message: "無法讀取上次更新的復原紀錄", Error: journalErr.Error()}
+	} else if journal != nil {
+		logger.Warn("unfinished update journal detected", "strategy", journal.Strategy, "phase", journal.Phase, "from", journal.FromCommit, "target", journal.TargetCommit)
+		m.pendingJournal = journal
+		m.state = GameState{
+			Status:              StatusRecovering,
+			Message:             "偵測到未完成的更新，正在準備復原…",
+			ProgressPhase:       "準備復原",
+			ProgressText:        "正在檢查上次更新的安全狀態…",
+			ProgressPercent:     -1,
+			ProgressStep:        1,
+			ProgressStepTotal:   updateRecoverySteps,
+			ProgressCancellable: false,
+		}
+	} else if err := m.initialise(); err != nil {
 		logger.Error("game manager initialization failed", "error", err)
 		if isStorageUnavailableError(err) {
 			m.state = GameState{Status: StatusStorageUnavailable, Message: "遊戲儲存位置無法使用", Error: err.Error()}
@@ -178,6 +211,7 @@ func (m *gameManager) folderChangeSnapshot() (installed, running bool, activeRoo
 func (m *gameManager) applyFolderPaths(paths dataPaths, state GameState, activeRoot string) {
 	m.mu.Lock()
 	m.paths = paths
+	m.journalStore = newUpdateJournalStore(paths)
 	m.activeRoot = activeRoot
 	m.state = state
 	m.advanceRevisionLocked()
@@ -192,11 +226,16 @@ func (m *gameManager) commitFolderPaths(paths dataPaths, state GameState, active
 		m.mu.Unlock()
 		return errors.New("請等待目前的遊戲作業完成後再變更資料夾")
 	}
+	if m.pendingJournal != nil || m.journalLoadError != nil || m.state.Status == StatusRecovering || m.state.Status == StatusRecoveryFailed {
+		m.mu.Unlock()
+		return errors.New("請先完成上次更新的復原，再變更遊戲資料夾")
+	}
 	if err := persist(); err != nil {
 		m.mu.Unlock()
 		return err
 	}
 	m.paths = paths
+	m.journalStore = newUpdateJournalStore(paths)
 	m.activeRoot = activeRoot
 	m.state = state
 	m.advanceRevisionLocked()
@@ -208,6 +247,10 @@ func (m *gameManager) commitFolderPaths(paths dataPaths, state GameState, active
 
 func (m *gameManager) applyFolderInspectionError(paths dataPaths, err error) {
 	m.mu.Lock()
+	if m.pendingJournal != nil || m.journalLoadError != nil || m.state.Status == StatusRecovering || m.state.Status == StatusRecoveryFailed {
+		m.mu.Unlock()
+		return
+	}
 	m.paths = paths
 	if isStorageUnavailableError(err) {
 		m.state.Status = StatusStorageUnavailable
@@ -284,6 +327,7 @@ func (m *gameManager) finishFolderMoveFailure(previous GameState) {
 func (m *gameManager) finishFolderMoveSuccess(paths dataPaths, previous GameState) {
 	m.mu.Lock()
 	m.paths = paths
+	m.journalStore = newUpdateJournalStore(paths)
 	m.activeRoot = paths.Source
 	m.running = false
 	m.folderMoveStarted = time.Time{}
@@ -417,6 +461,10 @@ func (m *gameManager) withOpenableRoot(open func(string) error) error {
 func (m *gameManager) StartInstall() error {
 	m.logger.Info("install requested")
 	m.mu.Lock()
+	if m.pendingJournal != nil || m.journalLoadError != nil || m.state.Status == StatusRecovering || m.state.Status == StatusRecoveryFailed {
+		m.mu.Unlock()
+		return errors.New("請先完成上次更新的復原，再重新安裝遊戲")
+	}
 	if _, err := validateGameFolderRoot(m.paths.GameRoot); err != nil {
 		if isStorageUnavailableError(err) {
 			m.state.Status = StatusStorageUnavailable
@@ -529,10 +577,11 @@ func (m *gameManager) StartUpdate() error {
 	m.state.Status = StatusUpdating
 	m.state.Message = "正在同步官方最新遊戲內容…"
 	m.state.Error = ""
-	m.state.ProgressPhase = "準備"
-	m.state.ProgressText = "正在連線更新伺服器…"
+	m.state.ProgressPhase = "連線 GitHub"
+	m.state.ProgressText = "正在連線 GitHub…"
 	m.state.ProgressPercent = -1
 	m.state.ProgressSeconds = 0
+	m.startUpdateProgressLocked(time.Now())
 	m.advanceRevisionLocked()
 	state := m.state
 	m.wg.Add(1)
@@ -564,8 +613,10 @@ func (m *gameManager) Shutdown() {
 
 func (m *gameManager) finishJob(operation string, err error, fallback GameState, failureMessage, cancelledMessage string) {
 	m.mu.Lock()
+	m.stopOperationProgressLocked()
 	m.running = false
 	m.cancel = nil
+	recoveryRequired := errors.Is(err, errUpdateRecoveryRequired)
 	reconciledMissing := m.state.Status == StatusMissing && m.activeRoot == ""
 	missingRoot := false
 	if m.activeRoot != "" {
@@ -576,9 +627,10 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 			m.transitionToMissingLocked()
 		}
 		reconciledMissing = true
-	} else if err != nil && !reconciledMissing {
+	} else if err != nil && !reconciledMissing && !recoveryRequired {
 		if m.activeRoot != "" {
 			m.state = fallback
+			m.clearProgressLocked()
 			if errors.Is(err, context.Canceled) {
 				m.state.Message = cancelledMessage
 				m.state.Error = ""
@@ -599,6 +651,8 @@ func (m *gameManager) finishJob(operation string, err error, fallback GameState,
 		m.logger.Warn("Git job ended after active game installation disappeared", "operation", operation)
 	} else if err == nil {
 		m.logger.Info("Git job completed", "operation", operation, "status", state.Status, "commit", state.Commit)
+	} else if recoveryRequired {
+		m.logger.Error("Git job requires update recovery", "operation", operation, "error", err)
 	} else if errors.Is(err, context.Canceled) {
 		m.logger.Warn("Git job cancelled", "operation", operation)
 	} else {
@@ -644,18 +698,11 @@ func (m *gameManager) replaceWithLatestAndActivate(ctx context.Context, cause er
 }
 
 func (m *gameManager) beginVersionReplacement() {
+	m.setUpdateProgress(1, "重新連線 GitHub", "正在準備重新下載官方版本…", -1, true, true)
 	m.mu.Lock()
-	m.state.Status = StatusUpdating
 	m.state.Message = "正在重新下載官方最新版本…"
 	m.state.Error = ""
-	m.state.ProgressPhase = "重新下載"
-	m.state.ProgressText = "正在準備下載官方版本…"
-	m.state.ProgressPercent = -1
-	m.state.ProgressSeconds = 0
-	m.advanceRevisionLocked()
-	state := m.state
 	m.mu.Unlock()
-	m.publish(state)
 }
 
 func (m *gameManager) cloneVersionAndActivate(ctx context.Context, forceLatest bool, successMessage string) error {
@@ -698,6 +745,9 @@ func (m *gameManager) cloneVersionAndActivate(ctx context.Context, forceLatest b
 	}
 	m.ensureManagedGameExclude(staging)
 	progress.Stage("驗證檔案", "正在驗證遊戲檔案…")
+	if forceLatest {
+		m.setUpdateProgress(2, "下載更新檔案", "更新檔案已下載，正在準備驗證…", -1, true, false)
+	}
 	if err := validateGameRoot(staging); err != nil {
 		return fmt.Errorf("validate cloned game: %w", err)
 	}
@@ -709,7 +759,16 @@ func (m *gameManager) cloneVersionAndActivate(ctx context.Context, forceLatest b
 	if err != nil {
 		return fmt.Errorf("read cloned commit time: %w", err)
 	}
+	if forceLatest {
+		if _, err := validateInstalledCommit(staging, head.Hash()); err != nil {
+			return fmt.Errorf("fully validate replacement candidate: %w", err)
+		}
+	}
 	m.logger.Info("cloned revision validated", "commit", head.Hash().String())
+	if forceLatest {
+		m.setUpdateProgress(2, "下載更新檔案", "已下載並驗證官方更新檔案", 100, true, true)
+		return m.activateReplacementUpdate(ctx, staging, head.Hash().String(), commitTime, successMessage)
+	}
 	progress.Stage("啟用版本", "正在啟用遊戲版本…")
 	if err := m.replaceSource(staging); err != nil {
 		return err
@@ -880,6 +939,10 @@ func (m *gameManager) update(ctx context.Context) error {
 	if err != nil {
 		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("open game repository: %w", err))
 	}
+	localHead, err := repository.Head()
+	if err != nil {
+		return m.replaceWithLatestAndActivate(ctx, repositoryStateErrorf("read installed game revision: %w", err))
+	}
 	m.ensureManagedGameExclude(m.paths.Source)
 	remote, remoteObject, err := m.fetchOfficialMain(ctx, repository, "sync", "正在下載官方最新版本…")
 	if err != nil {
@@ -888,6 +951,7 @@ func (m *gameManager) update(ctx context.Context) error {
 		}
 		return err
 	}
+	m.setUpdateProgress(2, "下載更新檔案", "已確認官方更新檔案", 100, true, false)
 	manifest, err := gameCommitManifest(remoteObject)
 	if err != nil {
 		return m.replaceWithLatestAndActivate(ctx, repositoryStateErrorf("read official game tree: %w", err))
@@ -903,23 +967,72 @@ func (m *gameManager) update(ctx context.Context) error {
 	if _, err := worktree.Status(); err != nil {
 		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("inspect game working tree: %w", err))
 	}
-	m.updateGitProgress("套用版本", "正在以官方版本取代本機檔案…", -1, m.State().ProgressSeconds, true)
-	if err := forceSynchronizeGameTree(repository, worktree, m.paths.Source, remote.Hash(), manifest); err != nil {
-		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("force synchronize game working tree: %w", err))
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	m.updateGitProgress("驗證檔案", "正在驗證更新後的遊戲檔案…", -1, m.State().ProgressSeconds, true)
+	journal, err := m.prepareUpdateJournal(localHead.Hash().String(), remote.Hash().String(), updateJournalStrategyInPlace)
+	if err != nil {
+		return fmt.Errorf("prepare update recovery journal: %w", err)
+	}
+	if m.beforeUpdateApply != nil {
+		m.beforeUpdateApply()
+	}
+	if err := m.enterCriticalUpdate(ctx, 3, "套用遊戲版本", "正在以官方版本取代本機檔案…"); err != nil {
+		if clearErr := m.clearUpdateJournal(); clearErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("cancel update before apply (%v); clear recovery journal: %w", err, clearErr))
+		}
+		return err
+	}
+	if m.afterUpdateCritical != nil {
+		m.afterUpdateCritical()
+	}
+	synchronize := m.synchronizeUpdate
+	if synchronize == nil {
+		synchronize = forceSynchronizeGameTree
+	}
+	if err := synchronize(repository, worktree, m.paths.Source, remote.Hash(), manifest); err != nil {
+		cause := fmt.Errorf("force synchronize game working tree: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return m.replaceWithLatestAndActivate(ctx, cause)
+	}
+	m.setUpdateProgress(4, "驗證遊戲檔案", "正在驗證更新後的遊戲檔案…", -1, false, false)
 	if err := validateGameRoot(m.paths.Source); err != nil {
-		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("validate updated game: %w", err))
+		cause := fmt.Errorf("validate updated game: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return m.replaceWithLatestAndActivate(ctx, cause)
 	}
 	head, err := repository.Head()
 	if err != nil {
-		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("read synchronized revision: %w", err))
+		cause := fmt.Errorf("read synchronized revision: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return m.replaceWithLatestAndActivate(ctx, cause)
 	}
 	if head.Hash() != remote.Hash() {
-		return m.replaceWithLatestAndActivate(ctx, fmt.Errorf("synchronized HEAD %s does not match official revision %s", head.Hash(), remote.Hash()))
+		cause := fmt.Errorf("synchronized HEAD %s does not match official revision %s", head.Hash(), remote.Hash())
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return m.replaceWithLatestAndActivate(ctx, cause)
+	}
+	journal, err = m.commitUpdateJournal(journal)
+	if err != nil {
+		cause := fmt.Errorf("commit update recovery journal: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return cause
 	}
 	commitTime := remoteObject.Committer.When.Format(time.RFC3339)
 	m.logger.Info("forced synchronization completed", "commit", head.Hash().String())
+	if err := m.clearUpdateJournal(); err != nil {
+		return m.markUpdateRecoveryRequired(journal, fmt.Errorf("clear committed update journal: %w", err))
+	}
 	return m.activate(head.Hash().String(), commitTime, "更新完成；請重新整理或重新開啟瀏覽器頁面")
 }
 
@@ -1328,6 +1441,98 @@ func (m *gameManager) replaceSource(staging string) error {
 	return nil
 }
 
+func (m *gameManager) activateReplacementUpdate(ctx context.Context, staging, targetCommit, commitTime, successMessage string) error {
+	fromCommit, err := m.installedCommitForReplacement()
+	if err != nil {
+		return fmt.Errorf("identify current game before replacement: %w", err)
+	}
+	backup := m.updateBackupPath()
+	if err := os.RemoveAll(backup); err != nil {
+		return fmt.Errorf("clean previous update backup: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	journal, err := m.prepareUpdateJournal(fromCommit, targetCommit, updateJournalStrategyReplace)
+	if err != nil {
+		return fmt.Errorf("prepare replacement recovery journal: %w", err)
+	}
+	if err := m.enterCriticalUpdate(ctx, 3, "套用遊戲版本", "正在安全切換至重新下載的版本…"); err != nil {
+		if clearErr := m.clearUpdateJournal(); clearErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("cancel replacement before apply (%v); clear recovery journal: %w", err, clearErr))
+		}
+		return err
+	}
+	if err := m.replaceSourceWithBackup(staging); err != nil {
+		cause := fmt.Errorf("replace game source: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return cause
+	}
+	m.setUpdateProgress(4, "驗證遊戲檔案", "正在驗證重新下載的遊戲版本…", -1, false, false)
+	if _, err := validateInstalledCommit(m.paths.Source, plumbing.NewHash(targetCommit)); err != nil {
+		cause := fmt.Errorf("validate replaced game: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return cause
+	}
+	journal, err = m.commitUpdateJournal(journal)
+	if err != nil {
+		cause := fmt.Errorf("commit replacement recovery journal: %w", err)
+		if rollbackErr := m.rollbackPreparedUpdate(journal); rollbackErr != nil {
+			return m.markUpdateRecoveryRequired(journal, fmt.Errorf("%v; rollback failed: %w", cause, rollbackErr))
+		}
+		return cause
+	}
+	if err := m.cleanupUpdateStaging(); err != nil {
+		return m.markUpdateRecoveryRequired(journal, err)
+	}
+	if err := m.clearUpdateJournal(); err != nil {
+		return m.markUpdateRecoveryRequired(journal, fmt.Errorf("clear committed replacement journal: %w", err))
+	}
+	return m.activate(targetCommit, commitTime, successMessage)
+}
+
+func (m *gameManager) installedCommitForReplacement() (string, error) {
+	repository, repositoryErr := git.PlainOpen(m.paths.Source)
+	if repositoryErr == nil {
+		head, headErr := repository.Head()
+		if headErr == nil && validUpdateJournalCommit(head.Hash().String()) {
+			return head.Hash().String(), nil
+		}
+		repositoryErr = headErr
+	}
+	m.mu.RLock()
+	commit := m.state.Commit
+	m.mu.RUnlock()
+	if validUpdateJournalCommit(commit) {
+		m.logger.Warn("using last validated revision for replacement journal because current Git HEAD is unavailable", "commit", commit, "error", repositoryErr)
+		return commit, nil
+	}
+	if repositoryErr != nil {
+		return "", repositoryErr
+	}
+	return "", errors.New("current game revision is invalid")
+}
+
+func (m *gameManager) replaceSourceWithBackup(staging string) error {
+	backup := m.updateBackupPath()
+	if _, err := os.Lstat(m.paths.Source); err != nil {
+		return fmt.Errorf("inspect current game source: %w", err)
+	}
+	m.logger.Info("backing up current game source for journaled replacement", "backup", backup)
+	if err := os.Rename(m.paths.Source, backup); err != nil {
+		return fmt.Errorf("prepare current game replacement: %w", err)
+	}
+	if err := os.Rename(staging, m.paths.Source); err != nil {
+		return fmt.Errorf("install replacement game source: %w", err)
+	}
+	m.logger.Info("journaled game source replacement completed", "destination", m.paths.Source)
+	return nil
+}
+
 func (m *gameManager) activate(sha, commitTime, message string) error {
 	m.logger.Info("activating game revision", "commit", sha)
 	m.mu.Lock()
@@ -1352,6 +1557,9 @@ func (m *gameManager) activate(sha, commitTime, message string) error {
 
 func (m *gameManager) updateGitProgress(phase, text string, percent int, seconds int64, force bool) {
 	m.mu.Lock()
+	if m.operationProgress != nil {
+		seconds = elapsedSeconds(m.operationProgress.started, time.Now())
+	}
 	m.state.ProgressPhase = phase
 	m.state.ProgressText = text
 	m.state.ProgressPercent = percent

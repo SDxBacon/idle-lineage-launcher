@@ -5,11 +5,13 @@ import (
 	"sync"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
 type windowFactory struct {
-	mu  sync.Mutex
-	app *application.App
+	mu         sync.Mutex
+	app        *application.App
+	closeGuard *updateCloseCoordinator
 }
 
 func (factory *windowFactory) Create() application.Window {
@@ -34,6 +36,13 @@ func (factory *windowFactory) Create() application.Window {
 		),
 		DefaultContextMenuDisabled: true,
 	})
+	if factory.closeGuard != nil {
+		window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+			if !factory.closeGuard.HandleCloseRequest() {
+				event.Cancel()
+			}
+		})
+	}
 	slog.Info("launcher window created")
 	return window
 }

@@ -35,6 +35,7 @@ type gitProgressReporter struct {
 	lastGitOutput    time.Time
 	packDir          string
 	packBaseline     int64
+	lastPackWritten  int64
 	syntheticReceive bool
 	lastLoggedPhase  string
 	lastLoggedBucket int
@@ -82,8 +83,9 @@ func (reporter *gitProgressReporter) Stage(phase, text string) {
 	reporter.phase = phase
 	reporter.text = text
 	reporter.percent = -1
-	elapsed := int64(time.Since(reporter.started).Seconds())
+	elapsed := reporter.manager.operationElapsed(int64(time.Since(reporter.started).Seconds()))
 	reporter.mu.Unlock()
+	reporter.manager.noteGitProgressActivity(false)
 	reporter.manager.logger.Info("git stage", "operation", reporter.operation, "phase", phase, "detail", text)
 	reporter.manager.updateGitProgress(phase, text, -1, elapsed, true)
 }
@@ -119,7 +121,7 @@ func (reporter *gitProgressReporter) handleLine(line string) {
 	reporter.percent = percent
 	reporter.lastGitOutput = now
 	reporter.syntheticReceive = false
-	elapsed := int64(now.Sub(reporter.started).Seconds())
+	elapsed := reporter.manager.operationElapsed(int64(now.Sub(reporter.started).Seconds()))
 	bucket := -1
 	if percent >= 0 {
 		bucket = percent / 10
@@ -130,6 +132,7 @@ func (reporter *gitProgressReporter) handleLine(line string) {
 		reporter.lastLoggedBucket = bucket
 	}
 	reporter.mu.Unlock()
+	reporter.manager.noteGitProgressActivity(true)
 
 	if shouldLog {
 		reporter.manager.logger.Info("git progress", "operation", reporter.operation, "phase", phase, "percent", percent, "detail", text)
@@ -145,6 +148,9 @@ func (reporter *gitProgressReporter) heartbeat() {
 		case <-ticker.C:
 			now := time.Now()
 			if reporter.maybeShowSyntheticPackfileReceive(now) {
+				continue
+			}
+			if reporter.manager.hasOperationProgress() {
 				continue
 			}
 			reporter.mu.Lock()
@@ -184,10 +190,22 @@ func (reporter *gitProgressReporter) maybeShowSyntheticPackfileReceive(now time.
 		reporter.lastLoggedPhase = gitPackfileReceivePhase
 	}
 	reporter.lastLoggedBucket = -1
-	elapsed := int64(now.Sub(reporter.started).Seconds())
+	elapsed := reporter.manager.operationElapsed(int64(now.Sub(reporter.started).Seconds()))
 	reporter.mu.Unlock()
 
-	text := reporter.packfileReceiveText(packDir, packBaseline)
+	text, written := reporter.packfileReceiveText(packDir, packBaseline)
+	reporter.mu.Lock()
+	activity := written > reporter.lastPackWritten
+	if activity {
+		reporter.lastPackWritten = written
+		reporter.mu.Unlock()
+		reporter.manager.noteGitProgressActivity(true)
+	} else {
+		reporter.mu.Unlock()
+	}
+	if alreadySynthetic && reporter.manager.hasOperationProgress() && !activity {
+		return false
+	}
 	if shouldStartSynthetic {
 		reporter.manager.logger.Info("git stage", "operation", reporter.operation, "phase", gitPackfileReceivePhase, "detail", text)
 	}
@@ -195,7 +213,7 @@ func (reporter *gitProgressReporter) maybeShowSyntheticPackfileReceive(now time.
 	return true
 }
 
-func (reporter *gitProgressReporter) packfileReceiveText(packDir string, baseline int64) string {
+func (reporter *gitProgressReporter) packfileReceiveText(packDir string, baseline int64) (string, int64) {
 	written := int64(0)
 	if packDir != "" {
 		if size, err := directoryRegularFileSize(packDir); err == nil && size > baseline {
@@ -203,9 +221,9 @@ func (reporter *gitProgressReporter) packfileReceiveText(packDir string, baselin
 		}
 	}
 	if written <= 0 {
-		return gitPackfileReceiveText + "…"
+		return gitPackfileReceiveText + "…", 0
 	}
-	return fmt.Sprintf("%s… 本次已接收/寫入 %s", gitPackfileReceiveText, formatByteSize(written))
+	return fmt.Sprintf("%s… 本次已接收/寫入 %s", gitPackfileReceiveText, formatByteSize(written)), written
 }
 
 func directoryRegularFileSize(dir string) (int64, error) {

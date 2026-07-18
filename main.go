@@ -20,6 +20,7 @@ var version = ""
 
 func init() {
 	application.RegisterEvent[GameState]("launcher:game-state")
+	application.RegisterEvent[CloseGuardEvent](closeGuardEventName)
 }
 
 func main() {
@@ -60,6 +61,17 @@ func main() {
 	windows := &windowFactory{}
 	folders := newGameFolderCoordinator(manager, settingsStore, settings, defaultPaths.Root)
 	service := &LauncherService{manager: manager, folders: folders, version: version, gameLauncher: newGameLauncher()}
+	closeGuard := newUpdateCloseCoordinator(manager, func(event CloseGuardEvent) {
+		if app != nil {
+			app.Event.Emit(closeGuardEventName, event)
+		}
+	}, func() {
+		if app != nil {
+			app.Quit()
+		}
+	})
+	windows.closeGuard = closeGuard
+	service.closeGuard = closeGuard
 	app = application.New(application.Options{
 		Name:        "Idle Lineage Launcher",
 		Description: "Desktop launcher for Idle Lineage Class",
@@ -88,6 +100,7 @@ func main() {
 			manager.Shutdown()
 			slog.Info("launcher shutdown callback completed")
 		},
+		ShouldQuit: closeGuard.HandleCloseRequest,
 	})
 	service.openURL = app.Browser.OpenURL
 	service.openFolder = app.Env.OpenFileManager
@@ -111,7 +124,9 @@ func main() {
 	}
 	windows.app = app
 	windows.Create()
-	startStartupUpdateCheck(manager)
+	if !manager.StartPendingUpdateRecovery() {
+		startStartupUpdateCheck(manager)
+	}
 
 	slog.Info("starting Wails application loop")
 	if err := app.Run(); err != nil {

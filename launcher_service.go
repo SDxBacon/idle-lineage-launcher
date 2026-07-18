@@ -22,6 +22,7 @@ type LauncherInfo struct {
 
 type LauncherService struct {
 	manager      *gameManager
+	closeGuard   *updateCloseCoordinator
 	version      string
 	gameLauncher *GameLauncher
 	folders      *gameFolderCoordinator
@@ -114,6 +115,30 @@ func (service *LauncherService) CheckForUpdate() error {
 func (service *LauncherService) StartUpdate() error {
 	slog.Info("backend service call", "method", "StartUpdate")
 	return service.manager.StartUpdate()
+}
+
+func (service *LauncherService) CancelUpdate() error {
+	slog.Info("backend service call", "method", "CancelUpdate")
+	if service == nil || service.manager == nil {
+		return errors.New("game manager is unavailable")
+	}
+	return service.manager.CancelUpdate()
+}
+
+func (service *LauncherService) CancelUpdateAndClose() error {
+	slog.Info("backend service call", "method", "CancelUpdateAndClose")
+	if service == nil || service.closeGuard == nil {
+		return errors.New("update close coordinator is unavailable")
+	}
+	return service.closeGuard.CancelUpdateAndClose()
+}
+
+func (service *LauncherService) RetryUpdateRecovery() error {
+	slog.Info("backend service call", "method", "RetryUpdateRecovery")
+	if service == nil || service.manager == nil {
+		return errors.New("game manager is unavailable")
+	}
+	return service.manager.RetryUpdateRecovery()
 }
 
 func (service *LauncherService) CancelInstall() {

@@ -7,6 +7,8 @@ export {
 };
 
 export {
+    CloseGuardEvent,
+    CloseGuardMode,
     GameBrowser,
     GameFolderChangeResult,
     GameFolderInfo,

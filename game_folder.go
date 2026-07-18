@@ -326,6 +326,9 @@ func (coordinator *gameFolderCoordinator) Shutdown() {
 func (coordinator *gameFolderCoordinator) Recheck() error {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
+	if coordinator.manager.updateRecoveryPending() {
+		return errors.New("請先完成上次更新的復原，再重新檢查遊戲資料夾")
+	}
 	if _, running, _ := coordinator.manager.folderChangeSnapshot(); running {
 		return errors.New("請等待目前的遊戲作業完成後再重新檢查")
 	}
@@ -550,14 +553,8 @@ func inspectGameInstallation(paths dataPaths, logger *slog.Logger) (GameState, s
 	if _, err := validateGameFolderRoot(paths.GameRoot); err != nil {
 		return GameState{}, "", err
 	}
-	if entries, err := os.ReadDir(paths.Staging); err == nil {
-		for _, entry := range entries {
-			if err := os.RemoveAll(filepath.Join(paths.Staging, entry.Name())); err != nil {
-				return GameState{}, "", fmt.Errorf("remove stale staging data: %w", err)
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return GameState{}, "", fmt.Errorf("read staging directory: %w", err)
+	if err := clearGameStaging(paths.Staging); err != nil {
+		return GameState{}, "", fmt.Errorf("remove stale staging data: %w", err)
 	}
 	exists, err := pathExists(paths.Source)
 	if err != nil {
@@ -567,6 +564,49 @@ func inspectGameInstallation(paths dataPaths, logger *slog.Logger) (GameState, s
 		return GameState{Status: StatusMissing, Message: "尚未下載遊戲"}, "", nil
 	}
 	return inspectGameSource(paths.Source, logger)
+}
+
+func clearGameStaging(staging string) error {
+	expected, err := os.Lstat(staging)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect staging directory: %w", err)
+	}
+	if !expected.IsDir() || expected.Mode()&os.ModeSymlink != 0 {
+		return errors.New("staging path is not a real directory")
+	}
+	root, err := os.OpenRoot(staging)
+	if err != nil {
+		return fmt.Errorf("open staging directory: %w", err)
+	}
+	defer root.Close()
+	opened, err := root.Stat(".")
+	if err != nil {
+		return fmt.Errorf("inspect opened staging directory: %w", err)
+	}
+	if !os.SameFile(expected, opened) {
+		return errors.New("staging directory changed while it was being opened")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("read staging directory: %w", err)
+	}
+	entries, err := directory.ReadDir(-1)
+	closeErr := directory.Close()
+	if err != nil {
+		return fmt.Errorf("read staging directory: %w", err)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close staging directory: %w", closeErr)
+	}
+	for _, entry := range entries {
+		if err := root.RemoveAll(entry.Name()); err != nil {
+			return fmt.Errorf("remove staging entry %q: %w", entry.Name(), err)
+		}
+	}
+	return nil
 }
 
 func inspectGameSource(source string, logger *slog.Logger) (GameState, string, error) {

@@ -15,6 +15,9 @@ const mocks = vi.hoisted(() => {
     startInstall: vi.fn(),
     checkForUpdate: vi.fn(),
     startUpdate: vi.fn(),
+    cancelUpdate: vi.fn(),
+    cancelUpdateAndClose: vi.fn(),
+    retryUpdateRecovery: vi.fn(),
     cancelInstall: vi.fn(),
     launchGame: vi.fn(),
     openGameFolder: vi.fn(),
@@ -57,6 +60,8 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
     StatusChecking: 'checking',
     StatusUpdateAvailable: 'update_available',
     StatusUpdating: 'updating',
+    StatusRecovering: 'recovering',
+    StatusRecoveryFailed: 'recovery_failed',
     StatusMoving: 'moving',
     StatusStorageUnavailable: 'storage_unavailable',
     StatusCancelled: 'cancelled',
@@ -70,6 +75,9 @@ vi.mock('../bindings/github.com/SDxBacon/idle-lineage-launcher', () => ({
     StartInstall: mocks.startInstall,
     CheckForUpdate: mocks.checkForUpdate,
     StartUpdate: mocks.startUpdate,
+    CancelUpdate: mocks.cancelUpdate,
+    CancelUpdateAndClose: mocks.cancelUpdateAndClose,
+    RetryUpdateRecovery: mocks.retryUpdateRecovery,
     CancelInstall: mocks.cancelInstall,
     LaunchGame: mocks.launchGame,
     OpenGameFolder: mocks.openGameFolder,
@@ -94,6 +102,9 @@ type State = {
   progressText: string;
   progressPercent: number;
   progressSeconds: number;
+  progressStep: number;
+  progressStepTotal: number;
+  progressCancellable: boolean;
   message: string;
   error: string;
 };
@@ -110,6 +121,9 @@ const state = (overrides: Partial<State> = {}): State => ({
   progressText: '',
   progressPercent: -1,
   progressSeconds: 0,
+  progressStep: 0,
+  progressStepTotal: 0,
+  progressCancellable: false,
   message: '尚未下載遊戲',
   error: '',
   ...overrides,
@@ -149,6 +163,9 @@ describe('App', () => {
     mocks.startInstall.mockResolvedValue(undefined);
     mocks.checkForUpdate.mockResolvedValue(undefined);
     mocks.startUpdate.mockResolvedValue(undefined);
+    mocks.cancelUpdate.mockResolvedValue(undefined);
+    mocks.cancelUpdateAndClose.mockResolvedValue(undefined);
+    mocks.retryUpdateRecovery.mockResolvedValue(undefined);
     mocks.cancelInstall.mockResolvedValue(undefined);
     mocks.launchGame.mockResolvedValue({ fallbackToDefault: false });
     mocks.openGameFolder.mockResolvedValue(undefined);
@@ -609,10 +626,13 @@ describe('App', () => {
         status: 'updating',
         commit: 'local-commit',
         remoteCommit: 'remote-commit',
-        progressPhase: '同步官方版本',
+        progressPhase: '套用遊戲版本',
         progressText: '正在套用官方檔案',
-        progressPercent: 70,
+        progressPercent: -1,
         progressSeconds: 65,
+        progressStep: 3,
+        progressStepTotal: 4,
+        progressCancellable: false,
         message: '正在更新',
       }),
     );
@@ -623,14 +643,144 @@ describe('App', () => {
     expect(launchButton).toBeDisabled();
     expect(updateButton).toBeDisabled();
     expect(screen.getByRole('button', { name: '遊戲資料夾' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '開啟啟動器設置頁' })).toBeDisabled();
     expect(screen.getByText('正在套用官方檔案')).toBeInTheDocument();
     expect(screen.getByText('已執行 1 分 5 秒')).toBeInTheDocument();
+    expect(screen.getByText('步驟 3/4 · 套用遊戲版本')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: '套用遊戲版本' })).not.toHaveAttribute(
+      'aria-valuenow',
+    );
+    expect(screen.getByText('正在保護遊戲檔案，請保持 Launcher 開啟')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '取消更新' })).not.toBeInTheDocument();
 
     fireEvent.click(launchButton);
     fireEvent.click(updateButton);
 
     expect(mocks.launchGame).not.toHaveBeenCalled();
     expect(mocks.startUpdate).not.toHaveBeenCalled();
+  });
+
+  it('shows all update steps, phase-local progress, elapsed time, and cancellation only while safe', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({
+        status: 'updating',
+        commit: 'local-commit',
+        remoteCommit: 'remote-commit',
+        progressPhase: '接收 Git 物件',
+        progressText: '已接收 70%',
+        progressPercent: 70,
+        progressSeconds: 600,
+        progressStep: 2,
+        progressStepTotal: 4,
+        progressCancellable: true,
+      }),
+    );
+    render(<App />);
+
+    const stepper = await screen.findByRole('list', { name: '更新進度' });
+    expect(within(stepper).getAllByRole('listitem')).toHaveLength(4);
+    expect(within(stepper).getByText('連線 GitHub')).toBeInTheDocument();
+    expect(within(stepper).getByText('下載更新檔案').closest('li')).toHaveAttribute(
+      'aria-current',
+      'step',
+    );
+    expect(within(stepper).getByText('套用遊戲版本')).toBeInTheDocument();
+    expect(within(stepper).getByText('驗證遊戲檔案')).toBeInTheDocument();
+    expect(screen.getByText('步驟 2/4 · 接收 Git 物件')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: '接收 Git 物件' })).toHaveAttribute(
+      'aria-valuenow',
+      '70',
+    );
+    const elapsed = screen.getByText('已執行 10 分 0 秒');
+    expect(elapsed).toHaveAttribute('aria-live', 'off');
+    expect(elapsed.closest('.progress-block')).not.toHaveAttribute('aria-live');
+    expect(screen.queryByText('正在保護遊戲檔案，請保持 Launcher 開啟')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '取消更新' }));
+    expect(mocks.cancelUpdate).toHaveBeenCalledTimes(1);
+
+    emit(
+      'launcher:game-state',
+      state({
+        revision: 2,
+        status: 'updating',
+        commit: 'local-commit',
+        remoteCommit: 'remote-commit',
+        progressPhase: '解析下載內容',
+        progressText: '正在處理 pack',
+        progressPercent: 10,
+        progressSeconds: 601,
+        progressStep: 2,
+        progressStepTotal: 4,
+        progressCancellable: true,
+      }),
+    );
+
+    expect(screen.getByText('步驟 2/4 · 解析下載內容')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: '解析下載內容' })).toHaveAttribute(
+      'aria-valuenow',
+      '10',
+    );
+    expect(screen.getByText('已執行 10 分 1 秒')).toBeInTheDocument();
+  });
+
+  it('renders recovery progress and a retry-only failed recovery state', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({
+        status: 'recovering',
+        commit: 'local-commit',
+        progressPhase: '驗證遊戲檔案',
+        progressText: '正在確認復原結果…',
+        progressPercent: -1,
+        progressSeconds: 12,
+        progressStep: 2,
+        progressStepTotal: 2,
+        progressCancellable: false,
+      }),
+    );
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '正在復原遊戲' })).toBeInTheDocument();
+    const stepper = screen.getByRole('list', { name: '復原進度' });
+    expect(within(stepper).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(stepper).getByText('驗證遊戲檔案').closest('li')).toHaveAttribute(
+      'aria-current',
+      'step',
+    );
+    expect(screen.getByText('步驟 2/2 · 驗證遊戲檔案')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '啟動遊戲' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '正在復原遊戲' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: '開啟啟動器設置頁' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '取消更新' })).not.toBeInTheDocument();
+
+    emit('launcher:close-guard', {
+      mode: 'blocked',
+      progressPhase: '驗證遊戲檔案',
+    });
+    const recoveryDialog = await screen.findByRole('alertdialog', { name: '正在復原遊戲' });
+    expect(
+      within(recoveryDialog).getByText('為避免遊戲檔案不完整，復原完成前無法關閉 Launcher。'),
+    ).toBeInTheDocument();
+    fireEvent.click(within(recoveryDialog).getByRole('button', { name: '繼續等待' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+
+    emit(
+      'launcher:game-state',
+      state({
+        revision: 2,
+        status: 'recovery_failed',
+        commit: 'local-commit',
+        message: '無法完成自動復原',
+        error: '儲存裝置無法使用',
+      }),
+    );
+
+    expect(await screen.findByRole('heading', { name: '無法復原遊戲' })).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('儲存裝置無法使用');
+    expect(screen.getByRole('button', { name: '開啟啟動器設置頁' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '重試復原' }));
+    expect(mocks.retryUpdateRecovery).toHaveBeenCalledTimes(1);
   });
 
   it('keeps action errors across progress events and clears them on the next action', async () => {
@@ -660,7 +810,75 @@ describe('App', () => {
     );
   });
 
-  it('reacts to backend state events and unregisters only the state listener', async () => {
+  it('shows the safe-cancel close guard and requests cancellation before closing', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({
+        status: 'updating',
+        commit: 'local-commit',
+        progressStep: 2,
+        progressStepTotal: 4,
+        progressCancellable: true,
+      }),
+    );
+    render(<App />);
+    await screen.findByRole('heading', { name: '正在更新遊戲' });
+
+    emit('launcher:close-guard', {
+      mode: 'confirm_cancel',
+      progressPhase: '下載更新檔案',
+    });
+
+    let dialog = await screen.findByRole('alertdialog', { name: '更新仍在下載' });
+    expect(within(dialog).getByText('取消更新不會影響目前可用的遊戲版本。')).toBeInTheDocument();
+    expect(within(dialog).getByText('目前進度：下載更新檔案')).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: '繼續更新' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(mocks.cancelUpdateAndClose).not.toHaveBeenCalled();
+
+    emit('launcher:close-guard', {
+      mode: 'confirm_cancel',
+      progressPhase: '下載更新檔案',
+    });
+    dialog = await screen.findByRole('alertdialog', { name: '更新仍在下載' });
+    fireEvent.click(within(dialog).getByRole('button', { name: '取消更新並關閉' }));
+
+    expect(mocks.cancelUpdateAndClose).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+  });
+
+  it('blocks closing during a critical phase and offers only continued waiting', async () => {
+    mocks.getGameState.mockResolvedValue(
+      state({
+        status: 'updating',
+        commit: 'local-commit',
+        progressStep: 3,
+        progressStepTotal: 4,
+        progressCancellable: false,
+      }),
+    );
+    render(<App />);
+    await screen.findByRole('heading', { name: '正在更新遊戲' });
+
+    emit('launcher:close-guard', {
+      mode: 'blocked',
+      progressPhase: '套用遊戲版本',
+    });
+
+    const dialog = await screen.findByRole('alertdialog', { name: '正在套用更新' });
+    expect(
+      within(dialog).getByText('為避免遊戲檔案不完整，套用與驗證完成前無法關閉 Launcher。'),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: '繼續等待' })).toBeEnabled();
+    expect(
+      within(dialog).queryByRole('button', { name: '取消更新並關閉' }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: '繼續等待' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(mocks.cancelUpdateAndClose).not.toHaveBeenCalled();
+  });
+
+  it('reacts to backend state events and unregisters its runtime listeners', async () => {
     mocks.getGameState.mockResolvedValue(state());
     const { unmount } = render(<App />);
     await screen.findByRole('heading', { name: '尚未下載遊戲' });
@@ -671,9 +889,11 @@ describe('App', () => {
 
     unmount();
 
-    expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(mocks.unsubscribe).toHaveBeenCalledTimes(2);
     expect(mocks.unsubscribe).toHaveBeenCalledWith('launcher:game-state');
+    expect(mocks.unsubscribe).toHaveBeenCalledWith('launcher:close-guard');
     expect(mocks.listeners.get('launcher:game-state')?.size).toBe(0);
+    expect(mocks.listeners.get('launcher:close-guard')?.size).toBe(0);
     expect(mocks.listeners.has('launcher:reload-game')).toBe(false);
   });
 

@@ -12,11 +12,13 @@ import * as main$0 from "../../../../SDxBacon/idle-lineage-launcher/models.js";
 
 function configure() {
     Object.freeze(Object.assign($Create.Events, {
-        "launcher:game-state": $$createType0,
+        "launcher:close-guard": $$createType0,
+        "launcher:game-state": $$createType1,
     }));
 }
 
 // Private type creation functions
-const $$createType0 = main$0.GameState.createFrom;
+const $$createType0 = main$0.CloseGuardEvent.createFrom;
+const $$createType1 = main$0.GameState.createFrom;
 
 configure();

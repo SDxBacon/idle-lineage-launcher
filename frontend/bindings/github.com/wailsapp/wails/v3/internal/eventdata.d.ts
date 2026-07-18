@@ -12,6 +12,7 @@ import type * as main$0 from "../../../../SDxBacon/idle-lineage-launcher/models.
 declare module "@wailsio/runtime" {
     namespace Events {
         interface CustomEvents {
+            "launcher:close-guard": main$0.CloseGuardEvent;
             "launcher:game-state": main$0.GameState;
         }
     }

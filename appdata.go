@@ -10,13 +10,14 @@ import (
 const dataDirectoryName = "IdleLineageLauncher"
 
 type dataPaths struct {
-	Root     string
-	GameRoot string
-	Game     string
-	Source   string
-	Staging  string
-	WebView  string
-	Settings string
+	Root          string
+	GameRoot      string
+	Game          string
+	Source        string
+	Staging       string
+	WebView       string
+	Settings      string
+	UpdateJournal string
 }
 
 func resolveDataPaths() (dataPaths, error) {
@@ -56,12 +57,13 @@ func makeDataPaths(root string) dataPaths {
 func makeDataPathsForGameRoot(root, gameRoot string) dataPaths {
 	game := filepath.Join(gameRoot, "game")
 	return dataPaths{
-		Root:     root,
-		GameRoot: gameRoot,
-		Game:     game,
-		Source:   filepath.Join(game, "shines871"),
-		Staging:  filepath.Join(game, "staging"),
-		WebView:  filepath.Join(root, "webview"),
-		Settings: filepath.Join(root, "settings.json"),
+		Root:          root,
+		GameRoot:      gameRoot,
+		Game:          game,
+		Source:        filepath.Join(game, "shines871"),
+		Staging:       filepath.Join(game, "staging"),
+		WebView:       filepath.Join(root, "webview"),
+		Settings:      filepath.Join(root, "settings.json"),
+		UpdateJournal: filepath.Join(root, "update-journal.json"),
 	}
 }

@@ -7,6 +7,16 @@ import { Events } from '@wailsio/runtime';
 import SettingsView from '@/SettingsView';
 import InlineError from '@/components/InlineError';
 import LoadingMark from '@/components/LoadingMark';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Toaster } from '@/components/ui/sonner';
 import { useGameBrowsers } from '@/hooks/useGameBrowsers';
 import { fetchNewerLauncherVersion } from './launcherRelease';
@@ -42,6 +52,10 @@ function App() {
 }
 
 type LauncherView = 'dashboard' | 'settings';
+type CloseGuard = {
+  mode: 'confirm_cancel' | 'blocked';
+  progressPhase: string;
+};
 
 function LauncherDashboard() {
   const [gameState, setGameState] = useState<GameState | null>(null);
@@ -49,6 +63,9 @@ function LauncherDashboard() {
   const [gameFolderInfo, setGameFolderInfo] = useState<GameFolderInfo | null>(null);
   const [latestLauncherVersion, setLatestLauncherVersion] = useState<string | null>(null);
   const [actionError, setActionError] = useState('');
+  const [closeGuard, setCloseGuard] = useState<CloseGuard | null>(null);
+  const [closeGuardBusy, setCloseGuardBusy] = useState(false);
+  const [closeGuardError, setCloseGuardError] = useState('');
   const [view, setView] = useState<LauncherView>('dashboard');
   const { browsers, loadState } = useGameBrowsers();
   const browserID = useGameLaunchConfigStore(state => state.browserID);
@@ -67,6 +84,14 @@ function LauncherDashboard() {
     const unsubscribeState = Events.On('launcher:game-state', event => {
       applyState(event.data);
     });
+    const unsubscribeCloseGuard = Events.On('launcher:close-guard', event => {
+      if (!isCloseGuard(event.data)) {
+        return;
+      }
+      setCloseGuard(event.data);
+      setCloseGuardBusy(false);
+      setCloseGuardError('');
+    });
 
     LauncherService.GetGameState()
       .then(applyState)
@@ -81,6 +106,7 @@ function LauncherDashboard() {
     return () => {
       mounted = false;
       unsubscribeState();
+      unsubscribeCloseGuard();
     };
   }, []);
 
@@ -123,6 +149,15 @@ function LauncherDashboard() {
       .catch(error => setActionError(readError(error)));
   };
 
+  const cancelUpdateAndClose = () => {
+    setCloseGuardBusy(true);
+    setCloseGuardError('');
+    void LauncherService.CancelUpdateAndClose()
+      .then(() => setCloseGuard(null))
+      .catch(error => setCloseGuardError(readError(error)))
+      .finally(() => setCloseGuardBusy(false));
+  };
+
   if (!gameState) {
     return (
       <StatusShell
@@ -153,6 +188,7 @@ function LauncherDashboard() {
     installing ||
     status === GameStatus.StatusChecking ||
     status === GameStatus.StatusUpdating ||
+    status === GameStatus.StatusRecovering ||
     status === GameStatus.StatusMoving;
   const openGameRepository = () => runAction(() => LauncherService.OpenGameRepository());
   const recheckGameFolder = () =>
@@ -239,6 +275,16 @@ function LauncherDashboard() {
               </button>
             )}
 
+            {status === GameStatus.StatusUpdating && gameState.progressCancellable && (
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => runAction(() => LauncherService.CancelUpdate())}
+              >
+                取消更新
+              </button>
+            )}
+
             {status === GameStatus.StatusStorageUnavailable && (
               <>
                 <button className="primary-button" type="button" onClick={recheckGameFolder}>
@@ -283,6 +329,9 @@ function LauncherDashboard() {
                 type="button"
                 aria-label="開啟啟動器設置頁"
                 title="開啟啟動器設置頁"
+                disabled={
+                  status === GameStatus.StatusUpdating || status === GameStatus.StatusRecovering
+                }
                 onClick={() => setView('settings')}
               >
                 <SettingsIcon aria-hidden="true" />
@@ -291,6 +340,15 @@ function LauncherDashboard() {
           </div>
         </>
       )}
+
+      <UpdateCloseGuardDialog
+        guard={closeGuard}
+        recovering={status === GameStatus.StatusRecovering}
+        busy={closeGuardBusy}
+        error={closeGuardError}
+        onContinue={() => setCloseGuard(null)}
+        onCancelAndClose={cancelUpdateAndClose}
+      />
     </StatusShell>
   );
 }
@@ -470,6 +528,22 @@ function UpdateAction({
           正在更新遊戲
         </button>
       );
+    case GameStatus.StatusRecovering:
+      return (
+        <button className="secondary-button" type="button" disabled>
+          正在復原遊戲
+        </button>
+      );
+    case GameStatus.StatusRecoveryFailed:
+      return (
+        <button
+          className="secondary-button update-button"
+          type="button"
+          onClick={() => runAction(() => LauncherService.RetryUpdateRecovery())}
+        >
+          重試復原
+        </button>
+      );
     default:
       return null;
   }
@@ -479,11 +553,46 @@ function OperationProgress({ state }: { state: GameState }) {
   const percentage = state.progressPercent >= 0 ? Math.min(100, state.progressPercent) : null;
   const phase = state.progressPhase || defaultProgressPhase(state.status);
   const detail = state.progressText || state.message || '等待更新伺服器回應…';
+  const stepLabels = progressStepLabels(state.status);
+  const stepTotal = stepLabels
+    ? state.progressStepTotal === stepLabels.length
+      ? state.progressStepTotal
+      : stepLabels.length
+    : 0;
+  const currentStep = stepLabels ? clampStep(state.progressStep, stepTotal) : 0;
+  const phaseHeading = stepLabels ? `步驟 ${currentStep}/${stepTotal} · ${phase}` : phase;
+  const critical =
+    state.status === GameStatus.StatusRecovering ||
+    (state.status === GameStatus.StatusUpdating && !state.progressCancellable);
 
   return (
-    <div className="progress-block" aria-live="polite">
+    <div className="progress-block">
+      {stepLabels && (
+        <ol
+          className="progress-stepper"
+          aria-label={state.status === GameStatus.StatusRecovering ? '復原進度' : '更新進度'}
+        >
+          {stepLabels.map((label, index) => {
+            const step = index + 1;
+            const stateName =
+              step < currentStep ? 'complete' : step === currentStep ? 'current' : 'pending';
+            return (
+              <li
+                key={label}
+                className={`progress-step ${stateName}`}
+                aria-current={stateName === 'current' ? 'step' : undefined}
+              >
+                <span className="progress-step-marker" aria-hidden="true">
+                  {stateName === 'complete' ? '✓' : step}
+                </span>
+                <span>{label}</span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
       <div className="progress-heading">
-        <span>{phase}</span>
+        <span aria-live="polite">{phaseHeading}</span>
         <strong>{percentage === null ? '進行中' : `${percentage}%`}</strong>
       </div>
       <div
@@ -497,10 +606,89 @@ function OperationProgress({ state }: { state: GameState }) {
         {percentage !== null && <span style={{ width: `${percentage}%` }} />}
       </div>
       <div className="progress-details">
-        <span title={detail}>{detail}</span>
-        <span>{formatElapsed(state.progressSeconds)}</span>
+        <span title={detail} aria-live="polite">
+          {detail}
+        </span>
+        <span className="progress-elapsed" aria-live="off">
+          {formatElapsed(state.progressSeconds)}
+        </span>
       </div>
+      {critical && <p className="progress-critical">正在保護遊戲檔案，請保持 Launcher 開啟</p>}
     </div>
+  );
+}
+
+function UpdateCloseGuardDialog({
+  guard,
+  recovering,
+  busy,
+  error,
+  onContinue,
+  onCancelAndClose,
+}: {
+  guard: CloseGuard | null;
+  recovering: boolean;
+  busy: boolean;
+  error: string;
+  onContinue: () => void;
+  onCancelAndClose: () => void;
+}) {
+  const confirmCancel = guard?.mode === 'confirm_cancel';
+
+  return (
+    <AlertDialog
+      open={guard !== null}
+      onOpenChange={open => {
+        if (!open && !busy) onContinue();
+      }}
+    >
+      <AlertDialogContent
+        onEscapeKeyDown={event => {
+          if (busy) event.preventDefault();
+        }}
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {confirmCancel ? '更新仍在下載' : recovering ? '正在復原遊戲' : '正在套用更新'}
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {confirmCancel
+              ? '取消更新不會影響目前可用的遊戲版本。'
+              : recovering
+                ? '為避免遊戲檔案不完整，復原完成前無法關閉 Launcher。'
+                : '為避免遊戲檔案不完整，套用與驗證完成前無法關閉 Launcher。'}
+          </AlertDialogDescription>
+          {guard?.progressPhase && (
+            <p className="close-guard-phase">目前進度：{guard.progressPhase}</p>
+          )}
+        </AlertDialogHeader>
+
+        {error && <InlineError message={error} />}
+
+        <AlertDialogFooter>
+          <AlertDialogCancel asChild>
+            <button className="secondary-button" type="button" disabled={busy}>
+              {confirmCancel ? '繼續更新' : '繼續等待'}
+            </button>
+          </AlertDialogCancel>
+          {confirmCancel && (
+            <AlertDialogAction asChild>
+              <button
+                className="primary-button"
+                type="button"
+                disabled={busy}
+                onClick={event => {
+                  event.preventDefault();
+                  onCancelAndClose();
+                }}
+              >
+                {busy ? '正在取消…' : '取消更新並關閉'}
+              </button>
+            </AlertDialogAction>
+          )}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -517,6 +705,10 @@ function statusTitle(status: GameStatus) {
       return '有可用更新';
     case GameStatus.StatusUpdating:
       return '正在更新遊戲';
+    case GameStatus.StatusRecovering:
+      return '正在復原遊戲';
+    case GameStatus.StatusRecoveryFailed:
+      return '無法復原遊戲';
     case GameStatus.StatusMoving:
       return '正在搬移遊戲';
     case GameStatus.StatusStorageUnavailable:
@@ -543,6 +735,10 @@ function statusDescription(status: GameStatus) {
       return '新版本已可下載；更新前仍可啟動目前版本。';
     case GameStatus.StatusUpdating:
       return '正在套用新版本，完成前暫時無法啟動。';
+    case GameStatus.StatusRecovering:
+      return '偵測到上次更新未完成，正在自動復原可用版本。';
+    case GameStatus.StatusRecoveryFailed:
+      return '無法完成自動復原，請查看錯誤後重試。';
     case GameStatus.StatusMoving:
       return '正在將已安裝的遊戲搬移至新位置。';
     case GameStatus.StatusStorageUnavailable:
@@ -562,6 +758,8 @@ function defaultProgressPhase(status: GameStatus) {
       return '檢查官方版本';
     case GameStatus.StatusUpdating:
       return '同步官方版本';
+    case GameStatus.StatusRecovering:
+      return '復原可用版本';
     case GameStatus.StatusMoving:
       return '搬移遊戲';
     case GameStatus.StatusResolving:
@@ -569,6 +767,21 @@ function defaultProgressPhase(status: GameStatus) {
     default:
       return '下載官方版本';
   }
+}
+
+function progressStepLabels(status: GameStatus) {
+  if (status === GameStatus.StatusUpdating) {
+    return ['連線 GitHub', '下載更新檔案', '套用遊戲版本', '驗證遊戲檔案'];
+  }
+  if (status === GameStatus.StatusRecovering) {
+    return ['復原可用版本', '驗證遊戲檔案'];
+  }
+  return null;
+}
+
+function clampStep(step: number, total: number) {
+  if (!Number.isFinite(step) || step < 1) return 1;
+  return Math.min(total, Math.floor(step));
 }
 
 function shortCommit(commit: string, fallback: string) {
@@ -609,12 +822,23 @@ function readError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isCloseGuard(value: unknown): value is CloseGuard {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<CloseGuard>;
+  return (
+    (candidate.mode === 'confirm_cancel' || candidate.mode === 'blocked') &&
+    typeof candidate.progressPhase === 'string'
+  );
+}
+
 function isInstalledState(status: GameStatus) {
   return (
     status === GameStatus.StatusReady ||
     status === GameStatus.StatusChecking ||
     status === GameStatus.StatusUpdateAvailable ||
     status === GameStatus.StatusUpdating ||
+    status === GameStatus.StatusRecovering ||
+    status === GameStatus.StatusRecoveryFailed ||
     status === GameStatus.StatusMoving
   );
 }

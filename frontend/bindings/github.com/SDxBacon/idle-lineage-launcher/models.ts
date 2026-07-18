@@ -6,6 +6,44 @@
 import { Create as $Create } from "@wailsio/runtime";
 
 /**
+ * CloseGuardEvent tells the frontend why a close request was intercepted.
+ */
+export class CloseGuardEvent {
+    "mode": CloseGuardMode;
+    "progressPhase": string;
+
+    /** Creates a new CloseGuardEvent instance. */
+    constructor($$source: Partial<CloseGuardEvent> = {}) {
+        if (!("mode" in $$source)) {
+            this["mode"] = CloseGuardMode.$zero;
+        }
+        if (!("progressPhase" in $$source)) {
+            this["progressPhase"] = "";
+        }
+
+        Object.assign(this, $$source);
+    }
+
+    /**
+     * Creates a new CloseGuardEvent instance from a string or object.
+     */
+    static createFrom($$source: any = {}): CloseGuardEvent {
+        let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        return new CloseGuardEvent($$parsedSource as Partial<CloseGuardEvent>);
+    }
+}
+
+export enum CloseGuardMode {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    closeGuardConfirmCancel = "confirm_cancel",
+    closeGuardBlocked = "blocked",
+};
+
+/**
  * GameBrowser is a browser that the operating system has registered as able to
  * open the game's local HTML entry point. ID is an opaque platform identifier;
  * callers must not interpret it as an executable path or command.
@@ -147,6 +185,9 @@ export class GameState {
     "progressText": string;
     "progressPercent": number;
     "progressSeconds": number;
+    "progressStep": number;
+    "progressStepTotal": number;
+    "progressCancellable": boolean;
     "message": string;
     "error": string;
 
@@ -185,6 +226,15 @@ export class GameState {
         if (!("progressSeconds" in $$source)) {
             this["progressSeconds"] = 0;
         }
+        if (!("progressStep" in $$source)) {
+            this["progressStep"] = 0;
+        }
+        if (!("progressStepTotal" in $$source)) {
+            this["progressStepTotal"] = 0;
+        }
+        if (!("progressCancellable" in $$source)) {
+            this["progressCancellable"] = false;
+        }
         if (!("message" in $$source)) {
             this["message"] = "";
         }
@@ -217,6 +267,8 @@ export enum GameStatus {
     StatusChecking = "checking",
     StatusUpdateAvailable = "update_available",
     StatusUpdating = "updating",
+    StatusRecovering = "recovering",
+    StatusRecoveryFailed = "recovery_failed",
     StatusMoving = "moving",
     StatusStorageUnavailable = "storage_unavailable",
     StatusCancelled = "cancelled",

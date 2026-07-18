@@ -1557,6 +1557,32 @@ func TestInitialiseRemovesStaleStaging(t *testing.T) {
 	assertDirectoryEmpty(t, paths.Staging)
 }
 
+func TestInitialiseRejectsSymlinkedStagingWithoutDeletingTarget(t *testing.T) {
+	paths := makeDataPaths(t.TempDir())
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "keep.txt")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Game, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, paths.Staging); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	manager, err := newGameManager(paths, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manager.State().Status != StatusError {
+		t.Fatalf("symlinked staging state = %+v, want error", manager.State())
+	}
+	contents, err := os.ReadFile(sentinel)
+	if err != nil || string(contents) != "keep" {
+		t.Fatalf("staging cleanup touched symlink target: %q (%v)", contents, err)
+	}
+}
+
 func TestGitProgressReporterPublishesSidebandAndHeartbeat(t *testing.T) {
 	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
 	if err != nil {
@@ -1580,6 +1606,161 @@ func TestGitProgressReporterPublishesSidebandAndHeartbeat(t *testing.T) {
 	reporter.Close()
 	if output := logs.String(); !strings.Contains(output, "git stage") || !strings.Contains(output, "git progress") {
 		t.Fatalf("progress logging is incomplete: %s", output)
+	}
+}
+
+func TestUpdateProgressHeartbeatSpansLocalSynchronization(t *testing.T) {
+	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, time.July, 18, 10, 0, 0, 0, time.UTC)
+	manager.mu.Lock()
+	manager.state = GameState{
+		Status:              StatusUpdating,
+		ProgressPhase:       "套用遊戲版本",
+		ProgressText:        "正在以官方版本取代本機檔案…",
+		ProgressPercent:     -1,
+		ProgressStep:        3,
+		ProgressStepTotal:   updateProgressSteps,
+		ProgressCancellable: false,
+	}
+	manager.operationProgress = &gameOperationProgress{
+		sequence:     7,
+		started:      started,
+		lastActivity: started,
+		stop:         make(chan struct{}),
+	}
+	manager.mu.Unlock()
+
+	manager.publishOperationHeartbeat(7, started.Add(65*time.Second))
+	state := manager.State()
+	if state.ProgressSeconds != 65 || state.ProgressStep != 3 || state.ProgressText != "正在以官方版本取代本機檔案…" {
+		t.Fatalf("local synchronization heartbeat did not preserve end-to-end progress: %+v", state)
+	}
+}
+
+func TestUpdateProgressShowsWaitingAndSlowHintsWithoutTimingOut(t *testing.T) {
+	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, time.July, 18, 10, 0, 0, 0, time.UTC)
+	manager.mu.Lock()
+	manager.state = GameState{
+		Status:              StatusUpdating,
+		ProgressPhase:       "連線 GitHub",
+		ProgressText:        "正在連線 GitHub…",
+		ProgressPercent:     -1,
+		ProgressStep:        1,
+		ProgressStepTotal:   updateProgressSteps,
+		ProgressCancellable: true,
+	}
+	manager.operationProgress = &gameOperationProgress{
+		sequence:     9,
+		started:      started,
+		lastActivity: started,
+		network:      true,
+		stop:         make(chan struct{}),
+	}
+	manager.mu.Unlock()
+
+	manager.publishOperationHeartbeat(9, started.Add(9*time.Second))
+	if got := manager.State().ProgressText; got != "正在連線 GitHub…" {
+		t.Fatalf("waiting hint appeared too soon: %q", got)
+	}
+	manager.publishOperationHeartbeat(9, started.Add(10*time.Second))
+	if got := manager.State().ProgressText; got != updateWaitHintText {
+		t.Fatalf("waiting hint = %q, want %q", got, updateWaitHintText)
+	}
+	manager.publishOperationHeartbeat(9, started.Add(30*time.Second))
+	if got := manager.State().ProgressText; got != updateSlowHintText {
+		t.Fatalf("slow hint = %q, want %q", got, updateSlowHintText)
+	}
+	manager.publishOperationHeartbeat(9, started.Add(10*time.Minute))
+	state := manager.State()
+	if state.Status != StatusUpdating || state.ProgressSeconds != 600 || !state.ProgressCancellable {
+		t.Fatalf("slow update was timed out or lost cancellation: %+v", state)
+	}
+}
+
+func TestUpdateProgressDoesNotShowGitHubWaitHintsDuringLocalWork(t *testing.T) {
+	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, time.July, 18, 10, 0, 0, 0, time.UTC)
+	manager.mu.Lock()
+	manager.state = GameState{
+		Status:              StatusUpdating,
+		ProgressPhase:       "套用遊戲版本",
+		ProgressText:        "正在以官方版本取代本機檔案…",
+		ProgressStep:        3,
+		ProgressStepTotal:   updateProgressSteps,
+		ProgressPercent:     -1,
+		ProgressCancellable: false,
+	}
+	manager.operationProgress = &gameOperationProgress{
+		sequence:     10,
+		started:      started,
+		lastActivity: started,
+		network:      false,
+		stop:         make(chan struct{}),
+	}
+	manager.mu.Unlock()
+
+	manager.publishOperationHeartbeat(10, started.Add(10*time.Minute))
+	state := manager.State()
+	if state.ProgressText != "正在以官方版本取代本機檔案…" || state.ProgressSeconds != 600 {
+		t.Fatalf("local work received a GitHub wait hint or lost elapsed time: %+v", state)
+	}
+}
+
+func TestUpdateCancellationAndClosePolicyFollowSafetyPhase(t *testing.T) {
+	manager, err := newGameManager(makeDataPaths(t.TempDir()), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled := false
+	manager.mu.Lock()
+	manager.state = GameState{Status: StatusUpdating, ProgressCancellable: true}
+	manager.cancel = func() { cancelled = true }
+	manager.mu.Unlock()
+	if policy := manager.UpdateClosePolicy(); policy != updateCloseConfirmCancel {
+		t.Fatalf("network close policy = %v, want confirmation", policy)
+	}
+	if err := manager.CancelUpdate(); err != nil || !cancelled {
+		t.Fatalf("cancellable update was not cancelled: cancelled=%v err=%v", cancelled, err)
+	}
+
+	manager.mu.Lock()
+	manager.state.ProgressCancellable = false
+	manager.mu.Unlock()
+	if policy := manager.UpdateClosePolicy(); policy != updateCloseBlock {
+		t.Fatalf("critical close policy = %v, want blocked", policy)
+	}
+	if err := manager.CancelUpdate(); err == nil {
+		t.Fatal("critical update unexpectedly accepted cancellation")
+	}
+
+	manager.mu.Lock()
+	manager.state.Status = StatusReady
+	manager.mu.Unlock()
+	if policy := manager.UpdateClosePolicy(); policy != updateCloseAllow {
+		t.Fatalf("ready close policy = %v, want allow", policy)
+	}
+
+	manager.mu.Lock()
+	manager.state.Status = StatusRecovering
+	manager.mu.Unlock()
+	if policy := manager.UpdateClosePolicy(); policy != updateCloseBlock {
+		t.Fatalf("recovery close policy = %v, want blocked", policy)
+	}
+	manager.mu.Lock()
+	manager.state.Status = StatusRecoveryFailed
+	manager.mu.Unlock()
+	if policy := manager.UpdateClosePolicy(); policy != updateCloseAllow {
+		t.Fatalf("failed recovery close policy = %v, want allow", policy)
 	}
 }
 
